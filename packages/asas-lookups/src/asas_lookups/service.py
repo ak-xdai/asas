@@ -159,12 +159,27 @@ def list_values(
         .where(LookupValue.type_id == type_.id),
         session,
     )
-    if active_only:
-        stmt = stmt.where(LookupValue.status == LookupStatus.active)
     if parent_code:
-        parent = _value_by_code(session, type_.id, parent_code)
-        stmt = stmt.where(LookupValue.parent_id == (parent.id if parent else -1))
+        # All visible rows carrying the code: children may reference either the
+        # global parent's id or an org override's id (copy-on-write).
+        parents = session.exec(
+            _org_scoped(
+                select(LookupValue).where(
+                    LookupValue.type_id == type_.id, LookupValue.code == parent_code
+                ),
+                session,
+            )
+        ).all()
+        parent_ids = [p.id for p in parents] or [-1]
+        stmt = stmt.where(LookupValue.parent_id.in_(parent_ids))
     values = _prefer_org(list(session.exec(stmt).all()))
+
+    # Status filters AFTER the shadow collapse (DR 0001 T3): an org's
+    # deprecated override must keep shadowing its global row — filtering in SQL
+    # first dropped the override and let the platform value reappear for the
+    # very tenant that retired it (tombstone semantics).
+    if active_only:
+        values = [v for v in values if v.status == LookupStatus.active]
 
     if q:
         needle = q.strip().lower()
@@ -202,7 +217,15 @@ def get_value_read(
             status_code=404, detail=f"Unknown code '{code}' in '{type_.key}'"
         )
     if follow_supersede and value.superseded_by_id is not None:
-        replacement = session.get(LookupValue, value.superseded_by_id)
+        # Scoped, not session.get (DR 0001 T3): a pointer into a row outside
+        # the caller's visible set (another org's override) behaves as absent
+        # rather than leaking that org's labels.
+        replacement = session.exec(
+            _org_scoped(
+                select(LookupValue).where(LookupValue.id == value.superseded_by_id),
+                session,
+            )
+        ).first()
         if replacement:
             value = replacement
     code_map = {value.id: value.code}
@@ -358,6 +381,67 @@ def _apply_translations(
             )
 
 
+def _value_for_write(session: Session, type_: LookupType, code: str) -> LookupValue:
+    """Resolve the row a mutation may touch (DR 0001 T4). The write path never
+    reuses the read path's selection: ``_value_by_code`` answers "what does the
+    caller SEE" (org row OR global fallback), and mutating its fallback is how
+    one org's edit used to land on the platform row every tenant shares.
+
+    With org context: the caller's own org row — materialized copy-on-write
+    from the global row when the org has no override yet. Without context
+    (platform scope, DR 0001 T7): the global row only. 404 when nothing the
+    caller may write exists."""
+    org = _current_org(session)
+    base = select(LookupValue).where(
+        LookupValue.type_id == type_.id, LookupValue.code == code
+    )
+    if org is not None:
+        own = session.exec(base.where(LookupValue.org_id == org)).first()
+        if own:
+            return own
+    global_row = session.exec(base.where(LookupValue.org_id.is_(None))).first()
+    if global_row is None:
+        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    if org is None:
+        return global_row
+    return _materialize_override(session, global_row, org)
+
+
+def _materialize_override(
+    session: Session, global_row: LookupValue, org: int
+) -> LookupValue:
+    """Copy-on-write (DR 0001 D2): clone the platform row — translations and
+    aliases included, so labels and the search haystack survive the shadow —
+    as the caller's org override. The mutation then applies to the copy and
+    the global row stays untouched for every other tenant."""
+    copy = LookupValue(
+        type_id=global_row.type_id,
+        code=global_row.code,
+        org_id=org,
+        parent_id=global_row.parent_id,
+        status=global_row.status,
+        is_default=global_row.is_default,
+        sort_order=global_row.sort_order,
+        valid_from=global_row.valid_from,
+        valid_to=global_row.valid_to,
+        superseded_by_id=global_row.superseded_by_id,
+        meta=dict(global_row.meta or {}),
+    )
+    session.add(copy)
+    session.flush()  # id for the child rows
+    for t in global_row.translations:
+        session.add(
+            LookupTranslation(
+                value_id=copy.id, lang=t.lang, label=t.label, short_label=t.short_label
+            )
+        )
+    for a in global_row.aliases:
+        session.add(LookupAlias(value_id=copy.id, alias=a.alias, lang=a.lang))
+    session.flush()
+    session.refresh(copy)
+    return copy
+
+
 def create_value(
     session: Session,
     type_: LookupType,
@@ -428,9 +512,7 @@ def update_value(
     sort_order: Optional[int],
     meta: Optional[dict],
 ) -> LookupValue:
-    value = _value_by_code(session, type_.id, code)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = _value_for_write(session, type_, code)
     if translations is not None:
         _apply_translations(session, value, translations)
     if is_default is not None:
@@ -456,9 +538,7 @@ def deprecate_value(
     valid_to,
     superseded_by: Optional[str],
 ) -> LookupValue:
-    value = _value_by_code(session, type_.id, code)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = _value_for_write(session, type_, code)
     value.status = LookupStatus.deprecated
     value.valid_to = valid_to or datetime.utcnow().date()
     if superseded_by:
@@ -480,9 +560,7 @@ def deprecate_value(
 def add_alias(
     session: Session, type_: LookupType, code: str, alias: str, lang: Optional[str]
 ) -> LookupValue:
-    value = _value_by_code(session, type_.id, code)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = _value_for_write(session, type_, code)
     session.add(LookupAlias(value_id=value.id, alias=alias, lang=lang))
     _touch_type(type_)
     session.add(type_)
@@ -496,9 +574,7 @@ def remove_alias(
 ) -> LookupValue:
     """Delete every alias row matching ``alias`` on the value (idempotent: removing an
     alias that isn't there is a no-op, not an error)."""
-    value = _value_by_code(session, type_.id, code)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = _value_for_write(session, type_, code)
     for row in [a for a in value.aliases if a.alias == alias]:
         session.delete(row)
     _touch_type(type_)
@@ -515,10 +591,11 @@ def merge_values(
     is kept as an alias on the target so search still finds it."""
     if code == into:
         raise HTTPException(status_code=422, detail="Cannot merge a value into itself")
-    source = _value_by_code(session, type_.id, code)
-    target = _value_by_code(session, type_.id, into)
-    if not source or not target:
-        raise HTTPException(status_code=404, detail="Source or target code not found")
+    # Both sides are mutations (source deprecates, target gains aliases), so
+    # both resolve through the write path — an org merge copies-on-write both
+    # rows and leaves the platform values untouched for every other tenant.
+    source = _value_for_write(session, type_, code)
+    target = _value_for_write(session, type_, into)
     for t in source.translations:
         session.add(LookupAlias(value_id=target.id, alias=t.label, lang=t.lang))
     source.status = LookupStatus.deprecated

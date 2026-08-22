@@ -213,9 +213,14 @@ def _ensure_value(
     value healed), False otherwise — callers use this to know whether to bump the
     type ``version`` (which busts read-API ETags).
     """
+    # Platform rows only (DR 0001 T7): the seed runs with no org context and
+    # must not let an org-minted row of the same code suppress the platform
+    # default — the two can coexist by design (the partial uniques).
     existing = session.exec(
         select(LookupValue).where(
-            LookupValue.type_id == type_id, LookupValue.code == code
+            LookupValue.type_id == type_id,
+            LookupValue.code == code,
+            LookupValue.org_id.is_(None),
         )
     ).first()
     if existing:
