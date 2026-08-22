@@ -86,3 +86,31 @@ def test_admin_type_and_value_crud(client):
     )
     assert client.get("/lookups/widget").json()["total"] == 0
     assert client.get("/lookups/widget/sprocket").status_code == 200
+
+
+def test_list_etag_varies_with_query_shape(client):
+    """An ETag names a representation: page 2 or a filtered list is a
+    different body than page 1 of the same type version, so a 304 for one
+    must not be served for the other."""
+    r1 = client.get("/lookups/gender", params={"page_size": 1})
+    etag = r1.headers["ETag"]
+    assert (
+        client.get(
+            "/lookups/gender", params={"page_size": 1}, headers={"If-None-Match": etag}
+        ).status_code
+        == 304
+    )
+    r2 = client.get(
+        "/lookups/gender",
+        params={"page_size": 1, "page": 2},
+        headers={"If-None-Match": etag},
+    )
+    assert r2.status_code == 200  # different page: full body, not 304
+    r3 = client.get(
+        "/lookups/gender", params={"q": "zzzz"}, headers={"If-None-Match": etag}
+    )
+    assert r3.status_code == 200 and r3.json()["total"] == 0
+    r4 = client.get(
+        "/lookups/gender", params={"active": "false"}, headers={"If-None-Match": etag}
+    )
+    assert r4.status_code == 200
