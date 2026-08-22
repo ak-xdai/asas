@@ -6,6 +6,7 @@ Auth is composition-time: the host applies its guards when including the routers
 this package never learns the host's auth model.
 """
 
+import hashlib
 from typing import Callable, NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
@@ -80,9 +81,15 @@ def build_routers(get_session: Callable) -> Routers:
         type_ = service.get_type(session, type_key)
         # Cheap revalidation: ETag keyed on the type version (bumped on any change)
         # and the caller's org (WXL-241 — two orgs see different value sets of one
-        # type).
+        # type). The query shape must be in the tag too — an ETag is per
+        # *representation*, and page 2 or a filtered list is a different body
+        # than page 1: without this a conforming client 304-reuses page 1 for
+        # every other page/filter of the same type version.
         org = service._current_org(session)
-        etag = f'W/"{type_.key}.v{type_.version}.{lang}.o{org or 0}"'
+        shape = hashlib.sha1(
+            f"{active}.{q or ''}.{parent or ''}.{page}.{page_size}".encode()
+        ).hexdigest()[:8]
+        etag = f'W/"{type_.key}.v{type_.version}.{lang}.o{org or 0}.{shape}"'
         if if_none_match == etag:
             return Response(status_code=304, headers={"ETag": etag})
         total, items = service.list_values(
