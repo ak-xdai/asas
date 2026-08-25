@@ -9,6 +9,23 @@ on:
   pull_request:
 
 jobs:
+  # Every exported symbol must appear in its package's doc page (DR 0002).
+  # Cheap and independent of the test matrix: no services, no installs, one
+  # AST parse per package. Only packages that already have a page under
+  # docs/packages/ are gated, so adding this never turns the build red for
+  # documentation nobody has written yet — a package starts being checked the
+  # moment its page merges.
+  docs:
+    name: docs contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check documented surface
+        run: python tools/check_docs.py
+
   test:
     name: ${{ matrix.package }} (${{ matrix.engine }})
     runs-on: ubuntu-latest
