@@ -45,9 +45,37 @@ from .models import Agent
 # Token → agent email. A real host would not have this table, in either sense.
 FAKE_TOKENS: dict[str, str] = {
     "token-admin": "admin@example.invalid",
-    "token-lead": "lead@example.invalid",
     "token-agent": "agent@example.invalid",
+    "token-viewer": "viewer@example.invalid",
 }
+
+# The agents those tokens name, so the app is explorable by hand. Roles are
+# chosen to span what the policy actually distinguishes: `admin` clears the
+# implicit floor and holds unconfigured verbs, `member` holds the seeded grants,
+# `viewer` holds neither and is the one that gets `internal_note` redacted.
+DEMO_AGENTS: tuple[tuple[str, str, str], ...] = (
+    ("Ada Admin", "admin@example.invalid", "admin"),
+    ("Sam Agent", "agent@example.invalid", "member"),
+    ("Vic Viewer", "viewer@example.invalid", "viewer"),
+)
+
+
+def seed_demo_agents(session: Session) -> None:
+    """Create the agents ``FAKE_TOKENS`` names — only when fake auth is armed.
+
+    Gated rather than unconditional: these rows exist so a human can exercise
+    the permission seams from a terminal, and a host running without fake auth
+    has no use for three accounts nobody can sign in as.
+
+    Idempotent, like every other seed in the boot sequence.
+    """
+    if not settings.enable_fake_auth:
+        return
+    for name, email, role in DEMO_AGENTS:
+        if session.exec(select(Agent).where(Agent.email == email)).first():
+            continue
+        session.add(Agent(name=name, email=email, role=role))
+    session.commit()
 
 
 def _token_from(request: Request) -> Optional[str]:

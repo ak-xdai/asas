@@ -322,3 +322,26 @@ def test_unconfigured_verb_is_admin_only(app_module, agents):
 
         assert asas_access.action_allowed(session, admin, "ticket.classify")
         assert not asas_access.action_allowed(session, member, "ticket.classify")
+
+
+def test_classifying_needs_the_verb_not_just_edit_rights(client, app_module):
+    """A regression, found by driving the running app rather than the engine.
+
+    `test_unconfigured_verb_is_admin_only` above asserts the *engine* answers
+    correctly — and it passed while the router never asked. `classification_code`
+    has no field-permission rows, so `forbidden_edits` allows it under the
+    safe-by-default rule, and a plain member could stamp a ticket restricted.
+
+    The lesson generalises past this file: a test that exercises a package
+    directly cannot tell you whether the host called it.
+    """
+    with Session(app_module.engine) as session:
+        ticket_id = _ticket(session).id
+
+    response = client.patch(
+        f"/tickets/{ticket_id}", json={"classification_code": "restricted"}
+    )
+
+    assert response.status_code == 403, (
+        "classification_code was accepted without the ticket.classify verb"
+    )

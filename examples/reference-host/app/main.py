@@ -23,7 +23,7 @@ from fastapi import Depends, FastAPI
 
 from .config import settings
 from .db import create_host_schema, engine, get_session
-from .fake_auth import require_user
+from .fake_auth import require_user, seed_demo_agents
 from .wiring import access as access_wiring
 from .wiring import jobs as jobs_wiring
 from .wiring import lookups as lookups_wiring
@@ -106,6 +106,8 @@ async def lifespan(app: FastAPI):
         access_wiring.seed(session)
         workflow_wiring.seed(session)
         jobs_wiring.seed(session)
+        # Only writes anything when ENABLE_FAKE_AUTH is set; see fake_auth.py.
+        seed_demo_agents(session)
 
     for name, state in settings.tier_report().items():
         log.info("helpdesk: %-9s %s", name, state)

@@ -9,10 +9,17 @@ here as one line, and the order is the point:
     <the write>
     search     -> nothing; indexing is the engine's business, not the route's
 
-This file deliberately contains no permission logic of its own. Every ``if`` you
-might expect — "only leads see internal notes", "only admins classify" — is a
-seed row in ``wiring/access.py``. If you find yourself adding a role check to a
-handler, that is the signal you wanted a row.
+This file contains no permission *policy* of its own. The handlers ask the
+access engine questions; they never decide the answers. Every rule a reader
+expects to find here — "only members see internal notes", "only admins
+classify" — is a seed row in ``wiring/access.py``, and a role check written
+into a handler is the signal that somebody wanted a row.
+
+What the handlers do own is **which question to ask**, and that is not
+mechanical. Editing a field and stamping a classification are different
+questions — ``forbidden_edits`` and ``action_allowed`` — and asking only the
+first is how a plain member ends up able to reclassify a ticket. See
+``update_ticket``.
 """
 
 from __future__ import annotations
@@ -169,6 +176,25 @@ def update_ticket(
     ticket = _get_or_404(session, user, ticket_id)
     changes = payload.model_dump(exclude_none=True)
 
+    # Stamping a classification is a **verb**, not a field edit.
+    #
+    # The distinction is easy to miss and expensive: `classification_code` has
+    # no field-permission rows, so `forbidden_edits` below allows it — safe by
+    # default means an unconfigured *field* keeps its baseline rule. The gate
+    # that applies here is the action verb, and `ticket.classify` has no grant
+    # rows either, which makes it admin-only.
+    #
+    # Getting this wrong lets any editor raise a ticket's classification and
+    # disappear it from their colleagues, or lower it and expose one.
+    if (
+        "classification_code" in changes
+        and changes["classification_code"] != ticket.classification_code
+        and not asas_access.action_allowed(session, user, "ticket.classify")
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "not permitted to classify"
+        )
+
     # Field-level edit rights. Note this checks only fields whose value actually
     # *changes* — resubmitting the current value is a no-op, not a violation, so
     # a client echoing back a whole record does not trip on a field it may not
@@ -209,7 +235,7 @@ def escalate_ticket(
 
     ticket = _get_or_404(session, user, ticket_id)
     instance = workflow_wiring.request_escalation(session, ticket, user)
-    return {"instance_id": instance.id, "status": str(instance.status)}
+    return {"instance_id": instance.id, "status": instance.status.value}
 
 
 @router.get("")
