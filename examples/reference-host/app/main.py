@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
     validation_wiring.configure()
     ratelimit_wiring.configure()
     notifications_wiring.configure()
-    search_wiring.configure()
+    search_wiring.configure(engine)
     workflow_wiring.configure()
     # The jobs runner needs a session factory, not a session: it opens its own
     # per job, because a job outlives any request scope.

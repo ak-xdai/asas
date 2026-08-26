@@ -72,6 +72,76 @@ def _ticket_provider(session, user, q: str, lang: str, limit: int) -> list:
     return hits
 
 
-def configure() -> None:
-    """Step 4 of the boot sequence."""
+# --------------------------------------------------------------------------
+# The optional tier: ranked deep-content search, Postgres only.
+# --------------------------------------------------------------------------
+#
+# This module is the **dialect dispatch point**. The deep provider is registered
+# only when the engine is Postgres; on SQLite the base provider above answers
+# alone and the `/search` contract is byte-for-byte the same. That is the shape
+# to copy — branch once, here, rather than scattering `if postgres` through the
+# call sites.
+
+
+def _extract_ticket(ticket: Ticket):
+    """Turn a ticket into indexable documents.
+
+    ``internal_note`` is absent, and must stay absent. The index is a write-time
+    copy: once restricted text is in ``search_document`` there is no query-time
+    redaction that can take it back out of a substring match.
+    """
+    from asas_search.fts import IndexDoc
+
+    yield IndexDoc(
+        entity_type=ENTITY,
+        entity_id=ticket.id,
+        source="ticket_body",
+        source_id=ticket.id,
+        content=ticket.body or "",
+        context=ticket.title,
+    )
+
+
+def _resolve(session, user, ids: list) -> dict:
+    """Matched ids -> (title, subtitle, url_path), for the hits that survive."""
+    rows = session.exec(select(Ticket).where(Ticket.id.in_(ids))).all()
+    return {
+        t.id: (t.title, f"{t.status} · {t.priority_code}", f"/tickets/{t.id}")
+        for t in rows
+    }
+
+
+def _org_of(session, user):
+    """Single-tenant: no org scoping on the index."""
+    return None
+
+
+def _row_filter(session, user, entity_type: str, entity_id: int) -> bool:
+    """Visibility, still at query time — even in the deep tier.
+
+    The index does not know about clearances, and deliberately so: baking
+    visibility into it would mean re-indexing every record whenever anyone's
+    clearance changed.
+    """
+    ticket = session.get(Ticket, entity_id)
+    return ticket is not None and asas_access.mac_allows(session, user, ENTITY, ticket)
+
+
+def configure(engine=None) -> None:
+    """Step 4 of the boot sequence.
+
+    ``engine`` is optional so a caller with no bind still gets the portable
+    tier; passing it is what enables the Postgres-only half.
+    """
     search.register_provider(ENTITY, _ticket_provider)
+
+    if engine is None or not search.fts.is_postgres(engine):
+        return
+
+    search.fts.register_extractor("ticket_body", _extract_ticket)
+    search.register_provider(
+        ENTITY,
+        search.fts.make_provider(
+            ENTITY, resolver=_resolve, org_of=_org_of, row_filter=_row_filter
+        ),
+    )

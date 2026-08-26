@@ -17,6 +17,7 @@ handler, that is the signal you wanted a row.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Optional
 
 import asas_access
@@ -41,7 +42,10 @@ class TicketCreate(BaseModel):
     body: str = ""
     priority_code: str = "normal"
     category_code: Optional[str] = None
-    due_on: Optional[str] = None
+    # `date`, not `str`. Pydantic parses the ISO string for us, and the model
+    # column is a Date — handing SQLModel a string raises from inside the SQLite
+    # dialect, a long way from the schema that accepted it.
+    due_on: Optional[date] = None
     assignee_id: Optional[int] = None
 
 
@@ -52,30 +56,41 @@ class TicketUpdate(BaseModel):
     status: Optional[str] = None
     internal_note: Optional[str] = None
     classification_code: Optional[str] = None
-    due_on: Optional[str] = None
+    due_on: Optional[date] = None
 
 
-def _read_model(session: Session, user: Optional[Agent], ticket: Ticket) -> dict:
+class TicketRead(BaseModel):
+    """The read projection.
+
+    **It has to be an object, not a dict.** ``redact_view`` nulls fields with
+    ``hasattr``/``setattr``, so handing it a plain dict silently redacts nothing
+    — no error, no warning, and the restricted field goes straight to the
+    client. A dict projection is the natural thing to write in a small FastAPI
+    app, which is exactly what makes this worth a model and this paragraph.
+    """
+
+    id: int
+    title: str
+    body: str
+    priority_code: str
+    category_code: Optional[str]
+    status: str
+    assignee_id: Optional[int]
+    internal_note: Optional[str]
+    classification_code: Optional[str]
+    opened_on: date
+    due_on: Optional[date]
+
+
+def _read_model(session: Session, user: Optional[Agent], ticket: Ticket) -> TicketRead:
     """Project a ticket for the caller.
 
     ``redact_view`` nulls the fields this viewer may not see. It is a no-op for
     fields with no policy rows, so this single call is the whole of the read-side
     enforcement — there is no per-field branching to keep in sync.
     """
-    data = {
-        "id": ticket.id,
-        "title": ticket.title,
-        "body": ticket.body,
-        "priority_code": ticket.priority_code,
-        "category_code": ticket.category_code,
-        "status": ticket.status,
-        "assignee_id": ticket.assignee_id,
-        "internal_note": ticket.internal_note,
-        "classification_code": ticket.classification_code,
-        "opened_on": str(ticket.opened_on),
-        "due_on": str(ticket.due_on) if ticket.due_on else None,
-    }
-    return asas_access.redact_view(session, user, ENTITY, data, ticket)
+    view = TicketRead.model_validate(ticket, from_attributes=True)
+    return asas_access.redact_view(session, user, ENTITY, view, ticket)
 
 
 def _get_or_404(session: Session, user: Optional[Agent], ticket_id: int) -> Ticket:
@@ -99,7 +114,7 @@ def create_ticket(
     request: Request,
     session: Session = Depends(get_session),
     user: Optional[Agent] = Depends(get_current_user),
-) -> dict:
+) -> TicketRead:
     # 1. Rate limit, keyed on the caller. Cheapest check first, and the one that
     #    should reject before any database work happens.
     asas_ratelimit.check(
@@ -113,12 +128,22 @@ def create_ticket(
 
     changes = payload.model_dump(exclude_none=True)
 
-    # 3. Semantic validation, against the *resulting* record. Raises FastAPI's
-    #    native 422 so one client-side mapper handles Pydantic and rule
-    #    violations alike.
-    asas_validation.raise_if_invalid(ENTITY, None, changes)
-
+    # 3. Semantic validation, against the **effective** record — not the payload.
+    #
+    #    This distinction is the whole trick on a create path. A rule is skipped
+    #    when any value it reads is null, and `opened_on` is not in the payload:
+    #    it comes from the model's default. Validating `changes` alone therefore
+    #    silently skips every rule that reads it, and "due date before the
+    #    opening date" would be accepted.
+    #
+    #    So construct first, validate against what the row will actually hold.
     ticket = Ticket(**changes)
+    asas_validation.raise_if_invalid(
+        ENTITY,
+        None,
+        {**changes, "opened_on": ticket.opened_on, "due_on": ticket.due_on},
+    )
+
     session.add(ticket)
     session.commit()
     session.refresh(ticket)
@@ -130,7 +155,7 @@ def read_ticket(
     ticket_id: int,
     session: Session = Depends(get_session),
     user: Optional[Agent] = Depends(get_current_user),
-) -> dict:
+) -> TicketRead:
     return _read_model(session, user, _get_or_404(session, user, ticket_id))
 
 
@@ -140,7 +165,7 @@ def update_ticket(
     payload: TicketUpdate,
     session: Session = Depends(get_session),
     user: Optional[Agent] = Depends(get_current_user),
-) -> dict:
+) -> TicketRead:
     ticket = _get_or_404(session, user, ticket_id)
     changes = payload.model_dump(exclude_none=True)
 
@@ -191,7 +216,7 @@ def escalate_ticket(
 def list_tickets(
     session: Session = Depends(get_session),
     user: Optional[Agent] = Depends(get_current_user),
-) -> list[dict]:
+) -> list[TicketRead]:
     """Note the MAC filter is applied to the *list*, not just the detail route.
 
     A count leaks as much as a row. Filtering only the detail endpoint is the

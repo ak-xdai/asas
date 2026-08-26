@@ -48,13 +48,37 @@ def _context_binder(org_id, **_kwargs) -> None:
     return None
 
 
+def _already_notified(session: Session, ticket_id: int) -> bool:
+    """Has this ticket already produced an SLA notification?"""
+    return (
+        session.exec(
+            select(notifications.Notification).where(
+                notifications.Notification.kind == KIND_SLA_BREACHED,
+                notifications.Notification.entity_type == "ticket",
+                notifications.Notification.entity_id == ticket_id,
+            )
+        ).first()
+        is not None
+    )
+
+
 def _sla_sweep(session: Session, payload: dict | None = None, **_kwargs) -> None:
     """Notify on tickets past their due date.
 
-    Idempotent by construction: it only notifies tickets that are still open and
-    past due, and the notification kind coalesces, so a re-run after a crash
-    does not produce a second inbox row. Idempotence here is a property of the
-    query, not a flag — which is the durable way to get it.
+    **Idempotence has to be designed; it is not a property of "the query looks
+    read-only".** The obvious version of this handler — select the overdue
+    tickets, notify each — is *not* idempotent: delivery is at-least-once, so a
+    lease that lapses mid-run means the next attempt notifies everyone a second
+    time. Nothing about the select prevents that.
+
+    So the handler asks whether a notification already exists before writing
+    one. That check is the idempotence, and it is why it is a query against the
+    notifications table rather than a flag on the job.
+
+    (``notify(coalesce_unread=True)`` is the package's own answer to the same
+    problem, but it only engages when the kind has no delivery channels — this
+    kind has one, so it would silently not apply. Worth knowing before reaching
+    for it.)
     """
     overdue = session.exec(
         select(Ticket).where(
@@ -66,6 +90,8 @@ def _sla_sweep(session: Session, payload: dict | None = None, **_kwargs) -> None
 
     for ticket in overdue:
         if ticket.assignee_id is None:
+            continue
+        if _already_notified(session, ticket.id):
             continue
         notifications.notify(
             session,

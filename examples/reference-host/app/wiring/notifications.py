@@ -43,7 +43,10 @@ def _context_resolver(session: Session) -> Optional[tuple[int, int]]:
 
 
 def _recipient_filter(
-    session: Session, recipients: Iterable[int], record: object
+    session: Session,
+    recipients: Iterable[int],
+    entity_type: str,
+    record: object,
 ) -> set[int]:
     """Drop recipients who may not see the subject record.
 
@@ -51,6 +54,11 @@ def _recipient_filter(
     the need-to-know one — a classified ticket only notifies agents whose
     clearance reaches it. Note there is no admin floor here, which is MAC's
     defining property.
+
+    The filter runs only when the caller passes ``record=`` to ``notify``, and
+    the package then *requires* ``entity_type`` too. Omitting ``record`` is the
+    silent way to leak a classified ticket's title into an inbox, because the
+    filter simply never runs.
     """
     recipients = set(recipients)
     if not isinstance(record, Ticket) or record.classification_code is None:
@@ -61,7 +69,7 @@ def _recipient_filter(
         agent = session.get(Agent, agent_id)
         if agent is None:
             continue
-        if asas_access.mac_allows(session, agent, "ticket", record):
+        if asas_access.mac_allows(session, agent, entity_type, record):
             allowed.add(agent_id)
     return allowed
 
