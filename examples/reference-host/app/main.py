@@ -25,10 +25,14 @@ from .config import settings
 from .db import create_host_schema, engine, get_session
 from .fake_auth import require_user
 from .wiring import access as access_wiring
+from .wiring import jobs as jobs_wiring
 from .wiring import lookups as lookups_wiring
+from .wiring import notifications as notifications_wiring
 from .wiring import ratelimit as ratelimit_wiring
+from .wiring import search as search_wiring
 from .wiring import storage as storage_wiring
 from .wiring import validation as validation_wiring
+from .wiring import workflow as workflow_wiring
 
 log = logging.getLogger("helpdesk")
 
@@ -83,17 +87,25 @@ async def lifespan(app: FastAPI):
     # 4. `configure_*` hooks and registrations: declare what exists. These
     #    validate, so a typo'd field or a rule naming an unknown field fails the
     #    boot here rather than misbehaving quietly later.
+    from sqlmodel import Session
+
     lookups_wiring.configure()
     access_wiring.configure()
     validation_wiring.configure()
     ratelimit_wiring.configure()
+    notifications_wiring.configure()
+    search_wiring.configure()
+    workflow_wiring.configure()
+    # The jobs runner needs a session factory, not a session: it opens its own
+    # per job, because a job outlives any request scope.
+    jobs_wiring.configure(lambda: Session(engine))
 
     # 5. Seeds, last, and idempotent — safe on every boot.
-    from sqlmodel import Session
-
     with Session(engine) as session:
         lookups_wiring.seed(session)
         access_wiring.seed(session)
+        workflow_wiring.seed(session)
+        jobs_wiring.seed(session)
 
     for name, state in settings.tier_report().items():
         log.info("helpdesk: %-9s %s", name, state)
@@ -134,7 +146,10 @@ def _include_package_routers() -> None:
     package can know a host's auth model.
     """
     import asas_lookups
+    import asas_notifications
     import asas_validation
+
+    from .routers import tickets
 
     routers = asas_lookups.build_routers(get_session)
 
@@ -146,6 +161,21 @@ def _include_package_routers() -> None:
 
     # Rules the frontend mirrors for pre-submit feedback. Read-only, no guard.
     app.include_router(asas_validation.build_router())
+
+    # A recipient's own inbox — guarded, since it is per-user by definition.
+    app.include_router(
+        asas_notifications.build_router(get_session),
+        dependencies=[Depends(require_user)],
+    )
+
+    # The host's own domain routes.
+    app.include_router(tickets.router)
+
+    # Optional tier: mounted only when a token exists to authenticate against.
+    if settings.mcp_enabled:
+        from .wiring import mcp as mcp_wiring
+
+        app.mount("/mcp", mcp_wiring.build_app())
 
 
 _include_package_routers()
