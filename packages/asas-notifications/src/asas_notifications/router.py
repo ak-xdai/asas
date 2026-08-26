@@ -10,6 +10,7 @@ concern (e.g. a tenancy listener filtering the feed to the token's org).
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func as sa_func
 from sqlmodel import Session, select
 
 from . import service
@@ -48,27 +49,38 @@ def build_router(get_session) -> APIRouter:
     ):
         """The filters compose, and each one is independent: a host can ask for
         open + action (Teamy's "needs action"), unread + action, archived + action,
-        and so on. `total` follows the filters; `unread_count` never does."""
+        and so on. `total` follows the filters; `unread_count` never does.
+
+        Pagination happens in SQL (COUNT + LIMIT/OFFSET) — the feed used to fetch
+        every matching row and slice in Python. Queries are additionally
+        org-scoped when the context resolver supplies an org (defense in depth;
+        the host's tenancy layer remains the first line)."""
         user_id = _require_recipient(session)
-        base = select(Notification).where(Notification.user_id == user_id)
+        conditions = [Notification.user_id == user_id]
+        org_id = service.current_org_id(session)
+        if org_id is not None:
+            conditions.append(Notification.org_id == org_id)
         if state == "open":
-            base = base.where(Notification.archived_at.is_(None))
+            conditions.append(Notification.archived_at.is_(None))
         elif state == "archived":
-            base = base.where(Notification.archived_at.is_not(None))
+            conditions.append(Notification.archived_at.is_not(None))
         if unread_only:
-            base = base.where(Notification.read_at.is_(None))
+            conditions.append(Notification.read_at.is_(None))
         if category is not None:
-            base = base.where(Notification.category == category)
+            conditions.append(Notification.category == category)
+        total = session.exec(
+            select(sa_func.count()).select_from(Notification).where(*conditions)
+        ).one()
         rows = session.exec(
-            base.order_by(Notification.created_at.desc(), Notification.id.desc())
+            select(Notification)
+            .where(*conditions)
+            .order_by(Notification.created_at.desc(), Notification.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         ).all()
-        start = (page - 1) * page_size
         return NotificationList(
-            items=[
-                NotificationRead.model_validate(n)
-                for n in rows[start : start + page_size]
-            ],
-            total=len(rows),
+            items=[NotificationRead.model_validate(n) for n in rows],
+            total=total,
             unread_count=service.unread_count(session, user_id),
         )
 

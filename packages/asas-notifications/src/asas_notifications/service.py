@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from sqlalchemy import and_ as sa_and
+from sqlalchemy import func as sa_func
 from sqlalchemy import or_ as sa_or
 from sqlalchemy import select as sa_select
 from sqlalchemy import update as sa_update
@@ -95,6 +96,17 @@ def configure_recipient_filter(
 def current_user_id(session: Session) -> Optional[int]:
     ctx = _context_resolver(session) if _context_resolver else None
     return ctx[0] if ctx else None
+
+
+def current_org_id(session: Session) -> Optional[int]:
+    """The request's org, when a context resolver is configured and inside a
+    request. Feed/read/archive queries constrain on it *in addition to*
+    ``user_id`` (defense in depth for multi-tenant hosts — the plan's §15.2):
+    host-level tenancy listeners remain the first line, this is the second.
+    Outside a request (or with no resolver) it is None and no org constraint
+    applies — single-tenant behavior is unchanged."""
+    ctx = _context_resolver(session) if _context_resolver else None
+    return ctx[1] if ctx else None
 
 
 # ── routing policy ────────────────────────────────────────────────────────────
@@ -198,9 +210,10 @@ def notify(
     coalesce = coalesce_unread and not channels and entity_type and entity_id is not None
     updated: list[Notification] = []
     if coalesce:
+        org_id = current_org_id(session)
         remaining: list[int] = []
         for user_id in ids:
-            existing = session.exec(
+            stmt = (
                 select(Notification)
                 .where(
                     Notification.user_id == user_id,
@@ -215,7 +228,12 @@ def notify(
                     Notification.archived_at.is_(None),
                 )
                 .order_by(Notification.created_at.desc())
-            ).first()
+            )
+            if org_id is not None:
+                # entity ids are host ints with no cross-org uniqueness
+                # guarantee — never fold an event into another org's row.
+                stmt = stmt.where(Notification.org_id == org_id)
+            existing = session.exec(stmt).first()
             if existing is None:
                 remaining.append(user_id)
                 continue
@@ -262,20 +280,37 @@ def notify(
 
 def unread_count(session: Session, user_id: int) -> int:
     """Unread rows still in the inbox. Archived rows are excluded — they have left
-    the recipient's list, so counting them would leave a badge pointing at nothing."""
-    rows = session.exec(
-        select(Notification.id).where(
-            Notification.user_id == user_id,
-            Notification.read_at.is_(None),
-            Notification.archived_at.is_(None),
-        )
-    ).all()
-    return len(rows)
+    the recipient's list, so counting them would leave a badge pointing at nothing.
+
+    Counted in SQL (it used to fetch every id and ``len()`` them) and org-scoped
+    when a request context is available."""
+    stmt = select(sa_func.count()).select_from(Notification).where(
+        Notification.user_id == user_id,
+        Notification.read_at.is_(None),
+        Notification.archived_at.is_(None),
+    )
+    org_id = current_org_id(session)
+    if org_id is not None:
+        stmt = stmt.where(Notification.org_id == org_id)
+    return session.exec(stmt).one()
+
+
+def _owned(session: Session, user_id: int, notification_id: int) -> Optional[Notification]:
+    """The row, iff it belongs to this recipient — and, when a request context
+    supplies an org, to this org. A cross-org id probe answers exactly like a
+    missing row (404 at the router), never confirming the row exists."""
+    n = session.get(Notification, notification_id)
+    if n is None or n.user_id != user_id:
+        return None
+    org_id = current_org_id(session)
+    if org_id is not None and n.org_id != org_id:
+        return None
+    return n
 
 
 def mark_read(session: Session, user_id: int, notification_id: int) -> Optional[Notification]:
-    n = session.get(Notification, notification_id)
-    if n is None or n.user_id != user_id:
+    n = _owned(session, user_id, notification_id)
+    if n is None:
         return None
     if n.read_at is None:
         n.read_at = datetime.utcnow()
@@ -288,11 +323,13 @@ def mark_read(session: Session, user_id: int, notification_id: int) -> Optional[
 def mark_all_read(session: Session, user_id: int) -> int:
     """Every unread row, archived ones included — a superset of what
     :func:`unread_count` counts, so this can never leave the badge non-zero."""
-    rows = session.exec(
-        select(Notification).where(
-            Notification.user_id == user_id, Notification.read_at.is_(None)
-        )
-    ).all()
+    stmt = select(Notification).where(
+        Notification.user_id == user_id, Notification.read_at.is_(None)
+    )
+    org_id = current_org_id(session)
+    if org_id is not None:
+        stmt = stmt.where(Notification.org_id == org_id)
+    rows = session.exec(stmt).all()
     now = datetime.utcnow()
     for n in rows:
         n.read_at = now
@@ -318,8 +355,8 @@ def archive(session: Session, user_id: int, notification_id: int) -> Optional[No
     race sends a duplicate email, while losing this one moves a timestamp by
     milliseconds on a row that ends archived either way.
     """
-    n = session.get(Notification, notification_id)
-    if n is None or n.user_id != user_id:
+    n = _owned(session, user_id, notification_id)
+    if n is None:
         return None
     if n.archived_at is None:
         n.archived_at = datetime.utcnow()
@@ -332,8 +369,8 @@ def archive(session: Session, user_id: int, notification_id: int) -> Optional[No
 def unarchive(session: Session, user_id: int, notification_id: int) -> Optional[Notification]:
     """Back into the inbox. Read state is untouched — the two axes are independent,
     so restoring a row does not make it unread again."""
-    n = session.get(Notification, notification_id)
-    if n is None or n.user_id != user_id:
+    n = _owned(session, user_id, notification_id)
+    if n is None:
         return None
     if n.archived_at is not None:
         n.archived_at = None
@@ -347,13 +384,15 @@ def archive_read(session: Session, user_id: int) -> int:
     """Bulk "clear what I've dealt with": archives the recipient's read rows and
     leaves unread ones alone. Never archives unread rows — that would hide
     something the recipient has not seen."""
-    rows = session.exec(
-        select(Notification).where(
-            Notification.user_id == user_id,
-            Notification.read_at.is_not(None),
-            Notification.archived_at.is_(None),
-        )
-    ).all()
+    stmt = select(Notification).where(
+        Notification.user_id == user_id,
+        Notification.read_at.is_not(None),
+        Notification.archived_at.is_(None),
+    )
+    org_id = current_org_id(session)
+    if org_id is not None:
+        stmt = stmt.where(Notification.org_id == org_id)
+    rows = session.exec(stmt).all()
     now = datetime.utcnow()
     for n in rows:
         n.archived_at = now
