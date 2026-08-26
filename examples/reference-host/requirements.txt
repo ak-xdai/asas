@@ -1,0 +1,26 @@
+# Local path dependencies, never pinned tags (design record 0030 §5a).
+#
+# A contract break in any package must fail this host's suite on the pull
+# request that caused it. A tag pin would make the reference host lag exactly
+# when it matters most — while a breaking change is under review.
+#
+# Relative paths resolve against the working directory, so install from here:
+#     pip install -r requirements.txt
+
+-e ../../packages/asas-lookups
+-e ../../packages/asas-access
+-e ../../packages/asas-validation
+-e ../../packages/asas-workflow
+-e ../../packages/asas-notifications
+-e ../../packages/asas-jobs
+-e ../../packages/asas-search
+-e ../../packages/asas-storage
+-e ../../packages/asas-ratelimit
+-e ../../packages/asas-mcp
+
+fastapi
+uvicorn
+sqlmodel
+alembic
+httpx
+pytest
