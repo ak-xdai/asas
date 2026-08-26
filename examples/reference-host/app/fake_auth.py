@@ -35,7 +35,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel import Session, select
 
 from .config import settings
@@ -78,15 +79,20 @@ def seed_demo_agents(session: Session) -> None:
     session.commit()
 
 
-def _token_from(request: Request) -> Optional[str]:
-    header = request.headers.get("Authorization", "")
-    if header.lower().startswith("bearer "):
-        return header[7:].strip()
-    return None
+# Declared as a FastAPI security scheme rather than parsed off the raw request,
+# for one reason: it is what puts the **Authorize** button in Swagger. Reading
+# `request.headers["Authorization"]` by hand works identically for a curl caller
+# and leaves `/docs` permanently anonymous, so none of the permission behaviour
+# is reachable from the browser — which defeats the point of having no frontend.
+#
+# `auto_error=False` keeps the app usable with no credentials at all: a missing
+# header yields None rather than a 403, so the default anonymous posture is
+# preserved.
+_bearer = HTTPBearer(auto_error=False, description="Try token-admin, token-agent or token-viewer.")
 
 
 def get_current_user(
-    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
     session: Session = Depends(get_session),
 ) -> Optional[Agent]:
     """Resolve the caller, or ``None`` when nobody is signed in.
@@ -98,10 +104,9 @@ def get_current_user(
     """
     if not settings.enable_fake_auth:
         return None
-    token = _token_from(request)
-    if token is None:
+    if credentials is None:
         return None
-    email = FAKE_TOKENS.get(token)
+    email = FAKE_TOKENS.get(credentials.credentials)
     if email is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="unknown token"
