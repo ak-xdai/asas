@@ -234,3 +234,39 @@ def test_format_hides_passing_checks_unless_verbose(migrated):
 
     assert "at head" not in report.format()
     assert "at head" in report.format(verbose=True)
+
+
+def test_a_broken_package_is_not_mistaken_for_an_absent_one(monkeypatch):
+    """An installed package whose own imports fail must not be skipped silently.
+
+    Catching every ImportError would make "the host never adopted this" and
+    "this package is installed but broken" look identical, and the CLI would
+    then report success over the second. Regression for that.
+    """
+    real = sc.importlib.import_module
+
+    def fake(name):
+        if name == "asas_storage":
+            # What a missing internal dependency looks like: the module we asked
+            # for is found, something it imports is not.
+            raise ModuleNotFoundError("No module named '某'", name="某")
+        return real(name)
+
+    monkeypatch.setattr(sc.importlib, "import_module", fake)
+
+    with pytest.raises(ModuleNotFoundError):
+        sc._import("asas_storage")
+
+
+def test_a_genuinely_absent_package_still_returns_none(monkeypatch):
+    """The other half: absence is not an error, because hosts adopt a subset."""
+    real = sc.importlib.import_module
+
+    def fake(name):
+        if name == "asas_storage":
+            raise ModuleNotFoundError("No module named 'asas_storage'", name="asas_storage")
+        return real(name)
+
+    monkeypatch.setattr(sc.importlib, "import_module", fake)
+
+    assert sc._import("asas_storage") is None

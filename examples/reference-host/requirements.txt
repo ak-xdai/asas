@@ -24,3 +24,9 @@ sqlmodel
 alembic
 httpx
 pytest
+
+# The DBAPI driver for the postgresql+psycopg2:// URLs this host documents.
+# The packages declare it only in their `dev` extras, which this file does not
+# install, so without it `DATABASE_URL=postgresql+psycopg2://...` fails at
+# create_engine with ModuleNotFoundError rather than anything informative.
+psycopg2-binary

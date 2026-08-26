@@ -224,11 +224,25 @@ def _import(name: str) -> Optional[Any]:
     """Import, or return None if the host does not use this package at all.
 
     A host is expected to adopt a subset; an absent package is not a finding.
+
+    **Only genuine absence returns None.** Catching every ``ImportError`` would
+    make a package that is installed but fails to initialize — a missing
+    internal dependency, a broken transitive import — indistinguishable from one
+    the host never adopted. It would then be skipped silently and the tool would
+    report success over it, which is precisely the class of quiet failure this
+    whole file exists to catch.
+
+    So the guard is narrow: a ``ModuleNotFoundError`` naming *this* module means
+    absent; anything else propagates.
     """
     try:
         return importlib.import_module(name)
-    except ImportError:
-        return None
+    except ModuleNotFoundError as exc:
+        # `exc.name` is the module that could not be found. If it is not the one
+        # we asked for, the package exists and its own imports are broken.
+        if exc.name == name or (exc.name and name.startswith(f"{exc.name}.")):
+            return None
+        raise
 
 
 def _chain_head(module: Any) -> Optional[str]:
@@ -491,11 +505,18 @@ def _app_lifespan(app: Any) -> Iterator[None]:
     loop = asyncio.new_event_loop()
     ctx = lifespan_context(app)
     try:
+        # Enter first, outside the try that guarantees exit: calling __aexit__
+        # on a context that never entered is its own error, and it would mask
+        # the startup failure that is the thing worth reporting.
         loop.run_until_complete(ctx.__aenter__())
-        yield
-    finally:
-        with contextlib.suppress(Exception):
+        try:
+            yield
+        finally:
+            # Shutdown failures propagate. Suppressing them lets main() return
+            # 0 for a host whose teardown raised — a self-check that reports
+            # success over a failure is worse than no self-check.
             loop.run_until_complete(ctx.__aexit__(None, None, None))
+    finally:
         loop.close()
 
 

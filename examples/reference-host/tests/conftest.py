@@ -18,6 +18,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlmodel import Session, create_engine
 
 _TEST_URL = os.environ.get("TEST_DATABASE_URL")
@@ -26,9 +27,21 @@ _TEST_URL = os.environ.get("TEST_DATABASE_URL")
 @pytest.fixture()
 def database_url(tmp_path):
     if _TEST_URL:
+        # This drops every table in the target database, once per test. Refuse
+        # unless the database name says it is disposable: pointing
+        # TEST_DATABASE_URL at a shared development database is an easy mistake
+        # to make and there is no recovery path from it.
+        name = make_url(_TEST_URL).database or ""
+        if "test" not in name:
+            raise RuntimeError(
+                f"refusing to reset database {name!r}: TEST_DATABASE_URL must name a "
+                f"database with 'test' in it, because this fixture drops its schema."
+            )
         eng = create_engine(_TEST_URL)
         with eng.begin() as conn:
-            conn.execute(text("DROP SCHEMA public CASCADE"))
+            # IF EXISTS: a freshly created database may have no public schema,
+            # and the bare form raises there.
+            conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
             conn.execute(text("CREATE SCHEMA public"))
         eng.dispose()
         return _TEST_URL

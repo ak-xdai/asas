@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import asas_access
 import asas_search as search
+from sqlalchemy import event
 from sqlmodel import select
 
-from ..models import Ticket
+from ..models import DEFAULT_ORG_ID, Ticket
 
 ENTITY = "ticket"
 
@@ -83,8 +84,8 @@ def _ticket_provider(session, user, q: str, lang: str, limit: int) -> list:
 # call sites.
 
 
-def _extract_ticket(ticket: Ticket):
-    """Turn a ticket into indexable documents.
+def _doc_for(ticket: Ticket):
+    """One ticket -> one index document.
 
     ``internal_note`` is absent, and must stay absent. The index is a write-time
     copy: once restricted text is in ``search_document`` there is no query-time
@@ -92,14 +93,28 @@ def _extract_ticket(ticket: Ticket):
     """
     from asas_search.fts import IndexDoc
 
-    yield IndexDoc(
+    return IndexDoc(
         entity_type=ENTITY,
         entity_id=ticket.id,
         source="ticket_body",
         source_id=ticket.id,
         content=ticket.body or "",
         context=ticket.title,
+        org_id=ticket.org_id,
     )
+
+
+def _extract_tickets(session):
+    """The registered extractor. **It takes a session, not a record.**
+
+    ``fts.rebuild`` calls ``extractor(session)`` and expects every document for
+    that source, which is the opposite of the per-record shape the name
+    suggests. Getting it wrong is invisible until a rebuild actually runs — and
+    a rebuild never runs if the host also forgets to call one, which is how this
+    host shipped a registered-but-inert deep tier.
+    """
+    for ticket in session.exec(select(Ticket)).all():
+        yield _doc_for(ticket)
 
 
 def _resolve(session, user, ids: list) -> dict:
@@ -112,8 +127,14 @@ def _resolve(session, user, ids: list) -> dict:
 
 
 def _org_of(session, user):
-    """Single-tenant: no org scoping on the index."""
-    return None
+    """The org whose documents this caller may search.
+
+    Single-tenant, so it is the constant every row carries. Returning ``None``
+    here reads like "no scoping" and is **not** — the provider filters on it, so
+    a ``None`` org matches only rows written with a ``None`` org. Combined with
+    documents written with a real ``org_id``, that silently returns nothing.
+    """
+    return DEFAULT_ORG_ID
 
 
 def _row_filter(session, user, entity_type: str, entity_id: int) -> bool:
@@ -127,6 +148,17 @@ def _row_filter(session, user, entity_type: str, entity_id: int) -> bool:
     return ticket is not None and asas_access.mac_allows(session, user, ENTITY, ticket)
 
 
+def _sync_on_write(_mapper, connection, ticket: Ticket) -> None:
+    """Keep the index fresh as tickets are written.
+
+    Registration alone indexes nothing — the extractor only runs on a rebuild.
+    Without this listener the deep tier answers correctly about the world as it
+    was at boot and never learns about a ticket created since, which looks
+    exactly like the tier working right up until it doesn't.
+    """
+    search.fts.upsert(connection, _doc_for(ticket))
+
+
 def configure(engine=None) -> None:
     """Step 4 of the boot sequence.
 
@@ -138,10 +170,26 @@ def configure(engine=None) -> None:
     if engine is None or not search.fts.is_postgres(engine):
         return
 
-    search.fts.register_extractor("ticket_body", _extract_ticket)
+    search.fts.register_extractor("ticket_body", _extract_tickets)
     search.register_provider(
         ENTITY,
         search.fts.make_provider(
             ENTITY, resolver=_resolve, org_of=_org_of, row_filter=_row_filter
         ),
     )
+
+    # Freshness on write, and a backfill for everything already there. Both are
+    # needed: the listener never sees rows written before it existed, and the
+    # backfill never sees rows written after it ran.
+    if not event.contains(Ticket, "after_insert", _sync_on_write):
+        event.listen(Ticket, "after_insert", _sync_on_write)
+        event.listen(Ticket, "after_update", _sync_on_write)
+
+
+def backfill(session) -> int:
+    """Step 5 (Postgres only): derive the index from what is already stored.
+
+    Idempotent — ``rebuild`` clears and re-derives, so re-running is safe and a
+    drifted index self-heals on the next boot.
+    """
+    return search.fts.rebuild(session)

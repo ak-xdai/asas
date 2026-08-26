@@ -345,3 +345,88 @@ def test_classifying_needs_the_verb_not_just_edit_rights(client, app_module):
     assert response.status_code == 403, (
         "classification_code was accepted without the ticket.classify verb"
     )
+
+
+# --------------------------------------------------------------------------
+# The optional tier. Untested until CodeRabbit pointed out that registering a
+# provider is not the same as having one that answers.
+# --------------------------------------------------------------------------
+
+
+def test_deep_search_index_is_populated_and_answers(client, app_module):
+    """Postgres only: prove the FTS arm actually returns hits.
+
+    The trap this pins: the deep provider was *registered* and completely inert
+    — no extractor ever ran, `search_document` held zero rows, and every search
+    was quietly answered by the portable provider alone. Both prior assertions
+    were negative ("no hits"), so they passed either way.
+
+    The query is chosen so only the deep arm can match: "emitting" appears
+    nowhere literally, so the portable `ilike` provider cannot find it, and only
+    stemming in the FTS index can. A `TIER_CONTENT` hit is the proof.
+    """
+    if app_module.engine.dialect.name != "postgresql":
+        pytest.skip("deep search is the Postgres-only tier")
+
+    import sqlalchemy as sa
+
+    with Session(app_module.engine) as session:
+        _ticket(session, title="Widget failure", body="the apparatus emits smoke")
+
+        indexed = session.execute(
+            sa.text("SELECT count(*) FROM search_document")
+        ).scalar()
+        assert indexed, "the write listener indexed nothing"
+
+        hits = asas_search.search(session, None, "emitting").get("ticket") or []
+
+    assert hits, "the deep arm found nothing for a stem-only query"
+    assert any(h.rank_tier == asas_search.TIER_CONTENT for h in hits), (
+        f"expected a TIER_CONTENT hit from the FTS arm, got tiers "
+        f"{[h.rank_tier for h in hits]} — the portable provider answered instead"
+    )
+
+
+def test_mcp_tools_apply_need_to_know(client, app_module, monkeypatch):
+    """The MCP surface must not be a way around MAC.
+
+    An MCP tool is a thin allowlist over capability the host already has, which
+    means it inherits the host's *checks*. Querying the table directly and
+    skipping `mac_allows` would give the protocol surface different permissions
+    from the REST API it mirrors.
+    """
+    monkeypatch.setenv("MCP_TOKEN", "secret")
+    from app.wiring import mcp as mcp_wiring
+
+    with Session(app_module.engine) as session:
+        open_id = _ticket(session, title="Ordinary jam").id
+        secret_id = _ticket(
+            session, title="Ordinary looking", classification_code="restricted"
+        ).id
+
+    found = {t["id"] for t in mcp_wiring._run_tool(None, "search_tickets", {"query": "Ordinary"})}
+    assert open_id in found
+    assert secret_id not in found, "MCP search returned a classified ticket"
+
+    assert mcp_wiring._run_tool(None, "get_ticket", {"ticket_id": secret_id}) == {
+        "error": "not found"
+    }
+
+
+def test_mcp_endpoint_verifies_its_token(monkeypatch):
+    """Without a verifier the endpoint mounts with no authentication at all."""
+    import asyncio
+
+    monkeypatch.setenv("MCP_TOKEN", "secret")
+    import importlib
+
+    import app.config
+
+    importlib.reload(app.config)
+    from app.wiring import mcp as mcp_wiring
+
+    importlib.reload(mcp_wiring)
+
+    verifier = mcp_wiring._StaticTokenVerifier()
+    assert asyncio.run(verifier.verify_token("secret")) is not None
+    assert asyncio.run(verifier.verify_token("wrong")) is None

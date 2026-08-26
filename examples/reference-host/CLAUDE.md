@@ -78,6 +78,20 @@ the things most likely to cost you an afternoon.
 - **`ensure_type(session, **kwargs)`** forwards straight to the model, so its
   accepted names are invisible in the signature. The identifier is `key`, not
   `code`. (`app/wiring/lookups.py`)
+- **A search extractor takes a *session*, not a record.** `fts.rebuild` calls
+  `extractor(session)` and expects every document for that source. The
+  per-record shape the name suggests fails only when a rebuild actually runs.
+  (`app/wiring/search.py`)
+- **Registering a deep-search provider indexes nothing.** You also need a write
+  listener and a backfill, or the tier is registered and permanently inert —
+  and every *negative* search assertion still passes. (`app/wiring/search.py`)
+- **`org_of` returning `None` is a filter, not "no filter".** It matches only
+  documents written with a `None` org, so pairing it with real `org_id`s
+  silently returns nothing. (`app/wiring/search.py`)
+- **`MCPToolDef` takes flat `read_only` / `destructive` / `idempotent`**, not an
+  `annotations` dict. (`app/wiring/mcp.py`)
+- **`build_mcp_app` without `token_verifier` mounts with no authentication.**
+  (`app/wiring/mcp.py`)
 
 ## Running it
 

@@ -108,6 +108,11 @@ async def lifespan(app: FastAPI):
         jobs_wiring.seed(session)
         # Only writes anything when ENABLE_FAKE_AUTH is set; see fake_auth.py.
         seed_demo_agents(session)
+        # Postgres-only: derive the deep-search index from what is stored.
+        # After the seeds, so anything they wrote is indexed too.
+        if settings.deep_search:
+            search_wiring.backfill(session)
+            session.commit()
 
     for name, state in settings.tier_report().items():
         log.info("helpdesk: %-9s %s", name, state)

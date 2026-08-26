@@ -202,9 +202,9 @@ jobs:
       # directory, so this must run from the reference host's own directory.
       - name: Install (local path dependencies)
         working-directory: examples/reference-host
-        run: |
-          pip install -r requirements.txt
-          pip install psycopg2-binary
+        # requirements.txt declares the postgres driver itself, so both matrix
+        # legs install identically and a developer gets the same environment.
+        run: pip install -r requirements.txt
 
       - name: Run tests
         working-directory: examples/reference-host

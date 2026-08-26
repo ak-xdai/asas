@@ -22,10 +22,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import asas_access
 import asas_mcp
+from mcp.server.auth.provider import AccessToken
 from sqlmodel import Session, select
 
-from ..db import engine
+from ..config import settings
 from ..models import Ticket
 
 TOOLS = [
@@ -40,7 +42,12 @@ TOOLS = [
             "required": ["query"],
             "additionalProperties": False,
         },
-        annotations={"readOnlyHint": True, "idempotentHint": True},
+        # Flat kwargs, not an `annotations` dict — the package builds the
+        # MCP annotations from these. Defaults already describe a read tool;
+        # stated explicitly because an inaccurate hint here removes a client's
+        # human-approval prompt, which is the only gate a write tool has.
+        read_only=True,
+        idempotent=True,
     ),
     asas_mcp.MCPToolDef(
         name="get_ticket",
@@ -51,13 +58,64 @@ TOOLS = [
             "required": ["ticket_id"],
             "additionalProperties": False,
         },
-        annotations={"readOnlyHint": True, "idempotentHint": True},
+        # Flat kwargs, not an `annotations` dict — the package builds the
+        # MCP annotations from these. Defaults already describe a read tool;
+        # stated explicitly because an inaccurate hint here removes a client's
+        # human-approval prompt, which is the only gate a write tool has.
+        read_only=True,
+        idempotent=True,
     ),
 ]
 
 
 def _list_tools() -> list:
     return TOOLS
+
+
+class _StaticTokenVerifier:
+    """Bearer verification for the MCP endpoint.
+
+    Without a verifier ``build_mcp_app`` mounts with **no authentication
+    middleware at all** — the endpoint is then a remote query API over the
+    database with no login. That is why the optional tier gates on `MCP_TOKEN`
+    existing, and why the token has to actually be checked rather than merely
+    present in the config.
+
+    As crude as `fake_auth.py`, and for the same reason: a real host verifies
+    against its own identity provider here.
+    """
+
+    async def verify_token(self, token: str) -> Optional[AccessToken]:
+        if not settings.mcp_token or token != settings.mcp_token:
+            return None
+        return AccessToken(
+            token=token, client_id="asas-reference-helpdesk", scopes=["read"]
+        )
+
+
+def _caller(session: Session):
+    """The subject an MCP request acts as.
+
+    A single shared token names no person, so the caller is resolved as
+    **anonymous** — holding no principals, and therefore reaching no classified
+    ticket. That is the safe reading of an ambiguous identity, and it is the
+    honest one: a host that wants per-user MCP access needs per-user tokens,
+    not a shared secret plus an assumption.
+    """
+    return None
+
+
+def _visible(session: Session, tickets) -> list:
+    """Apply need-to-know before anything leaves the process.
+
+    The tool layer is a thin allowlist over capability the host already has —
+    which means it inherits the host's *checks*, not merely its data access. A
+    tool that queries the table directly and skips `mac_allows` gives the MCP
+    surface different permissions from the REST API it mirrors, which is the
+    exact failure the thin-allowlist rule exists to prevent.
+    """
+    user = _caller(session)
+    return [t for t in tickets if asas_access.mac_allows(session, user, "ticket", t)]
 
 
 def _run_tool(token: Optional[str], name: str, arguments: dict) -> Any:
@@ -68,6 +126,11 @@ def _run_tool(token: Optional[str], name: str, arguments: dict) -> Any:
     also not hand back a field the REST layer would have redacted, and the
     cheapest way to guarantee that is to never select it.
     """
+    # Resolved per call rather than captured at import: the engine is a
+    # module-level singleton the host may rebuild (tests do), and a stale
+    # reference here would silently query a different database.
+    from ..db import engine
+
     with Session(engine) as session:
         if name == "search_tickets":
             pattern = f"%{arguments['query']}%"
@@ -75,12 +138,16 @@ def _run_tool(token: Optional[str], name: str, arguments: dict) -> Any:
                 select(Ticket).where(Ticket.title.ilike(pattern)).limit(20)
             ).all()
             return [
-                {"id": t.id, "title": t.title, "status": t.status} for t in rows
+                {"id": t.id, "title": t.title, "status": t.status}
+                for t in _visible(session, rows)
             ]
 
         if name == "get_ticket":
             ticket = session.get(Ticket, arguments["ticket_id"])
-            if ticket is None:
+            # Same 404-not-403 reasoning as the REST route: an inaccessible
+            # ticket is reported as absent, because confirming it exists is
+            # itself the disclosure.
+            if ticket is None or not _visible(session, [ticket]):
                 return {"error": "not found"}
             return {
                 "id": ticket.id,
@@ -103,4 +170,5 @@ def build_app():
         ),
         list_tools=_list_tools,
         run_tool=_run_tool,
+        token_verifier=_StaticTokenVerifier(),
     )

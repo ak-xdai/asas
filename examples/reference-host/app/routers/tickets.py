@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from ..config import settings
 from ..fake_auth import get_current_user
 from ..db import get_session
 from ..models import Agent, Ticket
@@ -124,13 +125,24 @@ def create_ticket(
 ) -> TicketRead:
     # 1. Rate limit, keyed on the caller. Cheapest check first, and the one that
     #    should reject before any database work happens.
-    asas_ratelimit.check(
-        TICKET_CREATE.name, str(user.id if user else request.client.host)
-    )
+    #
+    #    `request.client` is Optional in the ASGI spec — absent behind some
+    #    proxies and in some test transports — so it needs a fallback or an
+    #    anonymous create raises AttributeError and 500s instead of throttling.
+    caller = request.client.host if request.client else "anonymous"
+    asas_ratelimit.check(TICKET_CREATE.name, str(user.id) if user else caller)
 
     # 2. The action verb. Not a role check — an unconfigured verb is admin-only,
     #    and the grants live in access_policy, not here.
-    if user is not None and not asas_access.action_allowed(session, user, "ticket.create"):
+    #
+    #    The gate is *enforcement*, not *identity*. Asking only when `user is
+    #    not None` would invert the privilege order: an anonymous caller would
+    #    skip the check entirely while a signed-in one could be refused, so
+    #    signing in could only ever reduce what you may do. With auth armed,
+    #    anonymous holds no principals and `action_allowed` returns False.
+    if settings.enable_fake_auth and not asas_access.action_allowed(
+        session, user, "ticket.create"
+    ):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not permitted")
 
     changes = payload.model_dump(exclude_none=True)
@@ -143,13 +155,12 @@ def create_ticket(
     #    silently skips every rule that reads it, and "due date before the
     #    opening date" would be accepted.
     #
-    #    So construct first, validate against what the row will actually hold.
+    #    So construct first, then derive the values *from the row* rather than
+    #    hand-listing the defaults to back-fill. Hand-listing reopens the gap the
+    #    moment a column or a rule is added — `status` and `org_id` are already
+    #    defaults no payload carries.
     ticket = Ticket(**changes)
-    asas_validation.raise_if_invalid(
-        ENTITY,
-        None,
-        {**changes, "opened_on": ticket.opened_on, "due_on": ticket.due_on},
-    )
+    asas_validation.raise_if_invalid(ENTITY, None, ticket.model_dump())
 
     session.add(ticket)
     session.commit()
