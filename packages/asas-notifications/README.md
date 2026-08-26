@@ -28,7 +28,11 @@ refs are plain ints — no host FKs):
   (`alembic_version_asas_notifications`, adopt-or-create).
 - **`build_router(get_session)`** — the `/me/notifications` feed API; the host
   applies auth at include time.
-- **`configure_context_resolver(fn)`** — `(session) -> (user_id, org_id) | None`.
+- **`configure_context_resolver(fn)`** — `(session) -> (user_id, org_id) | None`;
+  must return `None` cheaply outside a request (it is consulted on read paths
+  too). When it supplies an org, the package scopes every feed/read/archive
+  query and coalesce lookup to it — defense in depth on top of the host's own
+  tenancy layer; a cross-org id probe 404s like a missing row.
 - **`configure_recipient_filter(fn)`** — `(session, user_ids, entity_type,
   record) -> user_ids` allowed to see the record.
 - **`register_kind` / `register_adapter`** — the kind catalog and channel

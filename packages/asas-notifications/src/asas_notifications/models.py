@@ -60,7 +60,12 @@ class Notification(SQLModel, table=True):
         # The feed: WHERE user_id = ? AND archived_at IS (NOT) NULL
         # ORDER BY created_at DESC. Subsumes the old single-column user_id index
         # (dropped in migration 0003).
-        Index("ix_notification_user_archived_created", "user_id", "archived_at", "created_at"),
+        # id trails as the ORDER BY tiebreaker (created_at DESC, id DESC) so
+        # tie-heavy batch emits still stream straight off the index.
+        Index(
+            "ix_notification_user_archived_created",
+            "user_id", "archived_at", "created_at", "id",
+        ),
         # The badge: WHERE user_id = ? AND read_at IS NULL AND archived_at IS NULL.
         Index("ix_notification_user_read_archived", "user_id", "read_at", "archived_at"),
     )

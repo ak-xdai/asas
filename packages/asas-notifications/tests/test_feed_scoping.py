@@ -12,6 +12,7 @@ from sqlmodel import Session
 
 import asas_notifications as notifications
 from asas_notifications import service
+from asas_notifications.models import Notification
 
 from conftest import emit
 
@@ -94,3 +95,40 @@ def test_coalesce_never_crosses_orgs(session, ambient_kind):
     assert second.id != first.id
     assert second.org_id == 2 and first.org_id == 1
     assert first.title == "org1"  # untouched
+
+
+def test_coalesce_requires_org_context(session, ambient_kind):
+    """Without an org context the lookup cannot tell orgs apart, so an org-less
+    emit (a background job in a host that stamps org_id via its own ORM
+    listener) inserts a fresh row instead of merging into one whose org it
+    cannot verify."""
+    from sqlalchemy import event
+
+    service.configure_context_resolver(lambda s: (0, 1))
+    first = emit(
+        session, ambient_kind, [1],
+        entity_type="work_item", entity_id=9, coalesce_unread=True, title="org1",
+    )[0]
+
+    # background emit: no request context; org stamped host-side at flush,
+    # the listener pattern the insert-path comment explicitly endorses
+    service.configure_context_resolver(lambda s: None)
+
+    @event.listens_for(session, "before_flush")
+    def _stamp(sess, ctx, instances):
+        for obj in sess.new:
+            if isinstance(obj, Notification) and obj.org_id is None:
+                obj.org_id = 2
+
+    try:
+        second = emit(
+            session, ambient_kind, [1],
+            entity_type="work_item", entity_id=9, coalesce_unread=True, title="org2",
+        )[0]
+    finally:
+        event.remove(session, "before_flush", _stamp)
+
+    assert second.id != first.id  # inserted, not merged
+    assert second.org_id == 2
+    refreshed = session.get(Notification, first.id)
+    assert refreshed.title == "org1" and refreshed.org_id == 1  # untouched

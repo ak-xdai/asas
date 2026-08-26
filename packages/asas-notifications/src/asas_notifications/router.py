@@ -3,18 +3,20 @@
 ``build_router(get_session)`` is the Asas host-contract factory: the host passes
 its FastAPI session dependency and applies its own auth guards at include time
 (the package stays auth-free). The current user comes from the context resolver
-the host configures (``configure_context_resolver``); org scoping is the host's
-concern (e.g. a tenancy listener filtering the feed to the token's org).
+the host configures (``configure_context_resolver``). When that resolver also
+supplies an org, the package scopes every feed/read/archive query to it —
+defense in depth on top of (never instead of) the host's own tenancy layer; a
+cross-org id probe 404s exactly like a missing row. Without a resolver (or
+outside a request) queries scope on ``user_id`` alone, as before 0.13.
 """
 
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func as sa_func
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from . import service
-from .models import Category, Notification
+from .models import Category
 from .schemas import (
     ArchiveResult,
     NotificationList,
@@ -51,33 +53,20 @@ def build_router(get_session) -> APIRouter:
         open + action (Teamy's "needs action"), unread + action, archived + action,
         and so on. `total` follows the filters; `unread_count` never does.
 
-        Pagination happens in SQL (COUNT + LIMIT/OFFSET) — the feed used to fetch
-        every matching row and slice in Python. Queries are additionally
-        org-scoped when the context resolver supplies an org (defense in depth;
-        the host's tenancy layer remains the first line)."""
+        Pagination happens in SQL via :func:`service.list_feed` — the feed used
+        to fetch every matching row and slice in Python — and queries are
+        org-scoped when the context resolver supplies an org (see the module
+        docstring)."""
         user_id = _require_recipient(session)
-        conditions = [Notification.user_id == user_id]
-        org_id = service.current_org_id(session)
-        if org_id is not None:
-            conditions.append(Notification.org_id == org_id)
-        if state == "open":
-            conditions.append(Notification.archived_at.is_(None))
-        elif state == "archived":
-            conditions.append(Notification.archived_at.is_not(None))
-        if unread_only:
-            conditions.append(Notification.read_at.is_(None))
-        if category is not None:
-            conditions.append(Notification.category == category)
-        total = session.exec(
-            select(sa_func.count()).select_from(Notification).where(*conditions)
-        ).one()
-        rows = session.exec(
-            select(Notification)
-            .where(*conditions)
-            .order_by(Notification.created_at.desc(), Notification.id.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        ).all()
+        rows, total = service.list_feed(
+            session,
+            user_id,
+            state=state,
+            unread_only=unread_only,
+            category=category,
+            page=page,
+            page_size=page_size,
+        )
         return NotificationList(
             items=[NotificationRead.model_validate(n) for n in rows],
             total=total,
