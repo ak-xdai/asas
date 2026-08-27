@@ -69,11 +69,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Presence-guarded like the upgrade: when the host's own chain carried the
-    # column and the upgrade added nothing, there may be nothing to drop (and
-    # if there is, the host chain owns it — dropping is still the only honest
-    # inverse this revision has; adopt-mode hosts downgrade with their own
-    # chain, not this one).
+    # Downgrade in this chain removes the package's schema footprint, exactly
+    # like the baseline's downgrade drops all four tables — including on an
+    # ADOPTED database, where the host's own chain owns them. Never run
+    # downgrade against an adopted database: this chain cannot tell a column
+    # (or table) it created from one the host chain owns, and ``migrate()``,
+    # the package contract, is upgrade-only. The presence guard below only
+    # makes the drop idempotent; it is not ownership detection.
     inspector = sa.inspect(op.get_bind())
     if "scope" not in {c["name"] for c in inspector.get_columns("lookup_type")}:
         return
