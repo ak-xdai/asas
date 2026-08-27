@@ -47,6 +47,18 @@ Resolver = Callable[[Any, Any, List[int]], Dict[int, Tuple[str, Optional[str], s
 
 
 def register_extractor(source: str, fn: Callable[[Any], Iterable[IndexDoc]]) -> None:
+    """Register how one source turns rows into :class:`IndexDoc` s.
+
+    ``fn`` receives the **session** — not a record — and yields every document
+    for this source. It runs on :func:`rebuild`.
+
+    **Registering an extractor does not keep the index fresh.** Nothing calls it
+    outside a rebuild, so a host needs all three of: this registration, a
+    backfill (``rebuild``) for rows that already exist, and ORM event listeners
+    calling :func:`upsert`/:func:`delete` for rows written afterwards. With only
+    the first, the index stays empty for ever and every *negative* search
+    assertion still passes — which is how an inert deep tier looks tested.
+    """
     _EXTRACTORS[source] = fn
 
 
@@ -102,7 +114,15 @@ def count(session: Any) -> int:
 
 def rebuild(session: Any) -> int:
     """Drop and re-derive the whole index from the registered extractors — the
-    one-time backfill and the drift safety net. Returns the number of docs."""
+    one-time backfill and the drift safety net. Returns the number of docs.
+
+    Note the extractor contract this depends on: an extractor is called as
+    ``extractor(session)`` and must yield **every** document for its source, not
+    one record's worth. A per-record extractor type-checks fine and simply never
+    produces anything here — and since a host that also forgets to call
+    ``rebuild`` never exercises it, the mistake can sit undetected behind an
+    index that is silently always empty.
+    """
     session.execute(text("DELETE FROM search_document"))
     total = 0
     for extractor in _EXTRACTORS.values():
@@ -128,6 +148,13 @@ def make_provider(
     Rank Fusion. Merged with the Phase 1 structured provider by the engine (per-id
     dedup; content hits rank last-tier but carry fusion scores, and snippets when
     the lexical arm matched).
+
+    ``org_of(session, user)`` returns the org whose documents this caller may
+    search. **Returning ``None`` is a filter, not the absence of one**: it
+    matches only documents written with a ``None`` ``org_id``. A single-tenant
+    host that returns ``None`` while its extractors stamp a real ``org_id``
+    therefore gets an empty result set on every query, for ever, with no error —
+    so return the same value the documents carry, whatever that is.
 
     ``org_of(session, user)`` supplies the caller's org (WXL-238) — the package
     stays model-free; app wiring reads its tenant context. No org ⇒ no deep hits

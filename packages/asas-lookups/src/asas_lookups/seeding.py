@@ -4,7 +4,7 @@ Run on startup (after ``migrate``). Safe to call repeatedly: types are matched b
 and values by ``code`` within a type, so nothing is duplicated.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 from sqlmodel import Session, select
 
@@ -82,13 +82,45 @@ _CURRENCY = [
 # behavior; it's classification vocabulary.
 # Risk & issue register categories — closed, admin-managed lists. Each value: code, en, ar.
 
-def ensure_type(session: Session, **kwargs) -> LookupType:
-    t = session.exec(
-        select(LookupType).where(LookupType.key == kwargs["key"])
-    ).first()
+def ensure_type(
+    session: Session,
+    *,
+    key: str,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    is_open: bool = False,
+    is_hierarchical: bool = False,
+    code_system: Optional[str] = None,
+    **extra: Any,
+) -> LookupType:
+    """Create the lookup type if it does not exist; return it either way.
+
+    ``key`` is the type's stable machine name (``"nationality"``,
+    ``"ticket_priority"``) and is what everything else references — **not**
+    ``code``, which is the field on a *value*. Getting those two the wrong way
+    round is the common first mistake, and it used to surface as a bare
+    ``KeyError: 'key'`` because this function forwarded ``**kwargs`` straight to
+    the model and named nothing.
+
+    ``name`` defaults to ``key`` so a caller seeding its own vocabulary can
+    supply one argument. ``is_open`` marks a type callers may extend at runtime
+    (skills, universities) rather than a closed list.
+
+    Idempotent, and **matched on key alone**: an existing type is returned
+    unchanged, so this never rewrites a deployment's edited label.
+    """
+    t = session.exec(select(LookupType).where(LookupType.key == key)).first()
     if t:
         return t
-    t = LookupType(**kwargs)
+    t = LookupType(
+        key=key,
+        name=name if name is not None else key,
+        description=description,
+        is_open=is_open,
+        is_hierarchical=is_hierarchical,
+        code_system=code_system,
+        **extra,
+    )
     session.add(t)
     session.commit()
     session.refresh(t)

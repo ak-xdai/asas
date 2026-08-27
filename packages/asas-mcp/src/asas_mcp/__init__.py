@@ -17,6 +17,6 @@ human-approval UX on them.
 
 from .server import MCPPromptArg, MCPPromptDef, MCPToolDef, build_mcp_app
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = ["MCPPromptArg", "MCPPromptDef", "MCPToolDef", "build_mcp_app", "__version__"]

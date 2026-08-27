@@ -191,6 +191,22 @@ def notify(
                 "filter cannot run without it"
             )
         ids = list(_recipient_filter(session, ids, entity_type, record))
+    elif entity_type and _recipient_filter is not None:
+        # The symmetric hole, and the one that actually leaked: naming an
+        # entity_type *without* its record skipped the filter just as silently.
+        # A host that has configured a filter has declared that some records are
+        # restricted; a notification about one of those entities that cannot be
+        # filtered is exactly the case the filter exists for, and the title and
+        # body are already written by the time anyone could redact them.
+        #
+        # Not raised when entity_type is absent too: a notification with no
+        # subject at all (a system announcement) has nothing to filter on.
+        raise ValueError(
+            f"notify(entity_type={entity_type!r}) requires record= when a recipient "
+            f"filter is configured — without it the filter cannot run and every "
+            f"named recipient is notified, including for a restricted record. "
+            f"Pass the subject row, or omit entity_type if there is no subject."
+        )
     if not ids:
         return []
 

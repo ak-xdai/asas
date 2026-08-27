@@ -204,3 +204,41 @@ def test_record_without_entity_type_fails_loud_not_unfiltered(session, kind):
     notifications.configure_recipient_filter(None)
     rows = emit(session, kind, [1, 3], record=object(), entity_id=9)
     assert [n.user_id for n in rows] == [1, 3]
+
+
+def test_entity_type_without_record_fails_loud_not_unfiltered(session, kind):
+    """The symmetric hole, and the one that actually leaked in a real host.
+
+    Naming an entity_type without its record skipped the visibility filter just
+    as silently as the reverse. A host that configured a filter has declared
+    some records restricted; a notification about one of those entities that
+    cannot be filtered is precisely what the filter exists for, and by the time
+    anyone could redact it the title is already in an inbox.
+    """
+    notifications.configure_recipient_filter(
+        lambda s, ids, entity_type, record: [u for u in ids if u != 3]
+    )
+    with pytest.raises(ValueError, match="requires record="):
+        emit(session, kind, [1, 3], entity_type="project", entity_id=9)
+    assert session.exec(select(Notification)).all() == []
+
+
+def test_a_subjectless_notification_needs_no_record(session, kind):
+    """No entity_type at all is a system announcement — nothing to filter on.
+
+    The guard must not make those impossible, or hosts will start passing a
+    meaningless entity_type to satisfy it.
+    """
+    notifications.configure_recipient_filter(
+        lambda s, ids, entity_type, record: [u for u in ids if u != 3]
+    )
+    rows = emit(session, kind, [1, 3])
+    assert [n.user_id for n in rows] == [1, 3]
+
+
+def test_the_guard_is_inert_without_a_configured_filter(session, kind):
+    """A single-tenant host that never configured a filter is not doing anything
+    wrong by omitting record — there is no filter to skip."""
+    notifications.configure_recipient_filter(None)
+    rows = emit(session, kind, [1, 3], entity_type="project", entity_id=9)
+    assert [n.user_id for n in rows] == [1, 3]

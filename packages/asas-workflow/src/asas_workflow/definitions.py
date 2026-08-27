@@ -110,6 +110,17 @@ def validate_definition(spec: DefinitionSpec, session: Optional[Session] = None)
     # Node config checks against the live registries.
     for n in spec.nodes:
         cfg = n.config or {}
+        if n.type == NodeType.end:
+            # The engine reads cfg["outcome"] unguarded when an instance reaches
+            # this node, so omitting it raises a bare KeyError from inside the
+            # engine — at decision time, far from the definition that caused it,
+            # and only for the branch that happens to reach this end. Caught here
+            # it is a boot-time error naming the node.
+            if not cfg.get("outcome"):
+                problems.append(
+                    f"end node '{n.key}' needs config['outcome'] — the string the "
+                    f"completion callback receives when an instance ends here"
+                )
         if n.type == NodeType.approval:
             principals = cfg.get("principals")
             if not principals or not isinstance(principals, list):

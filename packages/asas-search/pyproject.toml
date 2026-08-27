@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asas-search"
-version = "0.11.0"
+version = "0.12.0"
 description = "Asas search module: a cross-entity search engine with provider registry and rank tiers, plus an optional Postgres deep-content tier (bilingual FTS + pgvector semantic KNN with RRF fusion) behind a dialect-branched package Alembic chain."
 readme = "README.md"
 requires-python = ">=3.11"

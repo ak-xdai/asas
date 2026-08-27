@@ -5,6 +5,10 @@ Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
+## 0.14.0 — 2026-08-27
+
+- **`redact_view` now redacts mappings, and refuses shapes it cannot redact.** It nulled fields via `hasattr`/`setattr` only, so a plain `dict` read model matched nothing, came back unchanged, and the restricted field reached the caller **with no error** — a redaction function failing open. Dict and other `MutableMapping` projections are now redacted by key; a shape that is neither object nor mapping raises `TypeError` naming the fields it would have disclosed. Hosts passing Pydantic models (the common case) are unaffected. Found by the reference host (Teamy TEAMY-807).
+
 ## 0.13.0 — 2026-08-25
 
 - Internal: `asas_access.seed` (the module) is now `asas_access.seeding`; it shadowed nothing exported, but carried the same trap. The seeding entry points (`seed_field_permissions`, `seed_action_permissions`, `ensure_system_groups`, `ensure_clearance_levels`) are unchanged.

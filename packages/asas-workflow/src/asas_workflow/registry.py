@@ -66,6 +66,18 @@ def register_system_handler(handler_key: str, fn: SystemHandler) -> None:
 
 
 def register_completion_callback(process_key: str, fn: CompletionCallback) -> None:
+    """Register the owner's apply-logic for a completed instance.
+
+    Called as ``fn(session, instance, outcome)`` when an instance reaches an end
+    node, keyed on the definition's **purpose** (falling back to its key).
+
+    **The callback runs inside the engine's own transaction, and must not
+    commit.** That is deliberate: a callback failure then rolls the completion
+    back rather than leaving an instance marked complete with none of its
+    effects applied. Committing inside the callback silently discards that
+    guarantee, and the resulting half-applied state is not recoverable by
+    re-running anything.
+    """
     _COMPLETION_CALLBACKS[process_key] = fn
 
 

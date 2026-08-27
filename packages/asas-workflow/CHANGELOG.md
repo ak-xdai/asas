@@ -5,6 +5,12 @@ Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
+## 0.12.0 — 2026-08-27
+
+- **`validate_definition` now rejects an end node with no `config['outcome']`.** The engine reads that key unguarded when an instance reaches the node, so omitting it raised a bare `KeyError` from inside the engine — at decision time, far from the definition, and only on the branch that happened to reach that end. It is now a boot-time error naming the node. **Action for hosts:** every `NodeType.end` node needs `config={"outcome": "..."}`; definitions that already have one are unaffected (Teamy TEAMY-808).
+- `REJECTED_OUTCOME` is now exported. Hosts comparing `instance.outcome` had to restate the literal `"rejected"`, where a typo silently reads every rejection as an approval (Teamy TEAMY-808).
+- Documented two contracts that existed only in the engine's internals: a completion callback **runs inside the engine's transaction and must not commit** (committing discards the rollback-on-failure guarantee it exists to provide), and `final_decision_of` returns `(actor_id, comment)` — **not** the verdict, which reaches the callback as its third argument (Teamy TEAMY-808).
+
 ## 0.11.0 — 2026-08-25
 
 - **Breaking:** `asas_workflow.seed` (the module) is now `asas_workflow.seeding`. The old name shadowed the seeding callable, so `asas_workflow.seed(session)` — what the README documented — raised `TypeError: 'module' object is not callable`. Import `seed_workflow_definitions` from the package.

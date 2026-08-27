@@ -26,7 +26,8 @@ from .definitions import (  # noqa: F401
     set_binding,
     validate_definition,
 )
-from .engine import (  # noqa: F401
+from .engine import (
+    REJECTED_OUTCOME,  # noqa: F401
     EngineError,
     answer_info,
     cancel,
@@ -72,9 +73,10 @@ from .registry import (  # noqa: F401
     subject_renderer,
 )
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = [
+    "REJECTED_OUTCOME",
     "__version__",
     "ADMIN_FLOOR",
     "AssigneeStatus",

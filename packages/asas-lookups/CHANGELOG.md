@@ -5,6 +5,10 @@ Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
+## 0.12.0 — 2026-08-27
+
+- `ensure_type` now declares its parameters instead of forwarding `**kwargs` to the model. The accepted names were invisible in the signature and the identifier is `key`, not `code` — the natural first guess, which failed with a bare `KeyError: 'key'`. `name` now defaults to `key`. Existing keyword calls are unchanged (Teamy TEAMY-809).
+
 ## 0.11.0 — 2026-08-25
 
 - **Breaking: the library no longer seeds a host's own vocabulary.** `seed(session)` previously wrote seventeen lookup types that belonged to Teamy rather than to any people system — work-item statuses and types, project health, risk and issue categories, team categories, contract types, social platforms, next-of-kin relationships, office locations, and the open CV vocabularies (skill, company, degree, field of study, education institution, awarding body, training provider). A second host acquired all of it at boot, with no error.
