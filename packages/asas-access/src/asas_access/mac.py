@@ -36,6 +36,7 @@ enforcement on/off is the caller's concern.
 
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 
+from sqlalchemy import event
 from sqlmodel import Session, select
 
 from .models import ClearanceLevel, RecordMarking
@@ -142,16 +143,30 @@ def _classification_of(record: Any) -> Optional[str]:
     return getattr(v, "value", v)  # Enum -> value; plain str/None passes through
 
 
-def mac_allows(session: Session, user: Any, entity_type: str, record: Any) -> bool:
+def mac_allows(
+    session: Session,
+    user: Any,
+    entity_type: str,
+    record: Any,
+    *,
+    record_org_id: Optional[int] = None,
+) -> bool:
     """Whether the mandatory layer permits ``user`` to see ``record``. True for
     unregistered entity types and unclassified records; otherwise requires
     clearance rank ≥ the record's level rank AND record markings ⊆ subject
-    markings. **No admin floor** — that is the point of this layer."""
+    markings. **No admin floor** — that is the point of this layer.
+
+    The org the security decision runs under is the RECORD's — from the record
+    itself or the explicit ``record_org_id`` — never the caller's (DR 0001
+    T6/D4, audit defect T-3): substituting the caller's org looked up another
+    tenant's markings and rank catalog, reading a marked record as
+    unclassified and failing OPEN. A stamped record whose org cannot be
+    resolved denies."""
     if record is None or entity_type not in _CLASSIFIED:
         return True
     org_id = getattr(record, "org_id", None)
     if org_id is None:
-        org_id = getattr(user, "org_id", None)
+        org_id = record_org_id
     classification = _classification_of(record)
     marks: Set[str] = set()
     record_id = getattr(record, "id", None)
@@ -213,9 +228,16 @@ def ensure_clearance_levels(
             select(ClearanceLevel).where(ClearanceLevel.org_id == org_id)
         ).all()
     }
+    added = False
     for code, (name, rank) in levels.items():
         if code not in existing:
             session.add(
                 ClearanceLevel(org_id=org_id, code=code, name=name, rank=rank)
             )
-    invalidate_mac_cache()
+            added = True
+    if added:
+        # Invalidate only once the rows are durable (DR 0001 T8, audit defect
+        # T-9): clearing the process-global cache at mutation time lets any
+        # other session re-fill it from state a rollback then erases —
+        # phantom levels served until the next invalidation.
+        event.listen(session, "after_commit", lambda s: invalidate_mac_cache(), once=True)
