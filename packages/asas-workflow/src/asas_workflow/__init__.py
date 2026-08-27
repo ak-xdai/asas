@@ -76,7 +76,6 @@ from .registry import (  # noqa: F401
 __version__ = "0.11.1"
 
 __all__ = [
-    "REJECTED_OUTCOME",
     "__version__",
     "ADMIN_FLOOR",
     "AssigneeStatus",
@@ -97,6 +96,7 @@ __all__ = [
     "ProcessInstance",
     "ProcessNode",
     "ProcessTransition",
+    "REJECTED_OUTCOME",
     "TransitionSpec",
     "Verdict",
     "active_definitions_for_purpose",

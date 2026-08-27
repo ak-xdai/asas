@@ -30,7 +30,12 @@ refs are plain ints — no host FKs):
   applies auth at include time.
 - **`configure_context_resolver(fn)`** — `(session) -> (user_id, org_id) | None`.
 - **`configure_recipient_filter(fn)`** — `(session, user_ids, entity_type,
-  record) -> user_ids` allowed to see the record.
+  entity_id, record) -> user_ids` allowed to know the subject exists. Runs for
+  **every** `notify` that names an `entity_type`. `record` is the subject row
+  when the producer had it and `None` when it did not — a generic producer may
+  hold only the type and the id — so the filter gets both and decides: use the
+  row, resolve it from the id, or return `user_ids` unchanged for an entity
+  type that needs no gating.
 - **`register_kind` / `register_adapter`** — the kind catalog and channel
   adapters are the host's; `dispatch_pending(engine)` is one outbox pass and the
   host owns the cadences (after-commit hook, boot sweep, periodic job).

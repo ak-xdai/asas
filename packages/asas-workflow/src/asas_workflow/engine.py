@@ -473,9 +473,11 @@ def decide(
 def final_decision_of(
     session: Session, instance: ProcessInstance
 ) -> tuple[Optional[int], Optional[str]]:
-    """(actor_id, comment) of the decision that settled the instance — already
-    flushed when a completion callback runs, so callbacks can attribute the
-    outcome to its decider (WXL-215/216 both need this).
+    """(actor_id, comment) of the **latest positive or negative NodeDecision**
+    recorded against this instance — already flushed when a completion callback
+    runs, so callbacks can attribute an outcome to its decider (WXL-215/216 both
+    need this). It does not require the instance to have completed, and it does
+    not check that this decision is what ended it.
 
     **This does not tell you how the instance ended**, which the name invites
     you to expect. What settles that is the *completion outcome* — the end
