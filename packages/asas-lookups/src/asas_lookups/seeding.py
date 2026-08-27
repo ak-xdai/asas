@@ -84,20 +84,27 @@ _CURRENCY = [
 # Risk & issue register categories — closed, admin-managed lists. Each value: code, en, ar.
 
 def ensure_type(session: Session, **kwargs) -> LookupType:
-    # Per-type scope (issue #35) is explicit at registration and constrained:
-    # an open list means org users add values, which only an org-owned type
+    t = session.exec(
+        select(LookupType).where(LookupType.key == kwargs["key"])
+    ).first()
+    # Effective scope (issue #35): the explicit declaration, else the stored
+    # one for an existing type — an idempotent boot re-registration that omits
+    # scope must not judge is_open against the platform default — else the
+    # platform default for a new type.
+    explicit = kwargs.get("scope")
+    if explicit is not None:
+        scope = TypeScope(explicit)
+    else:
+        scope = t.scope if t else TypeScope.platform
+    # An open list means org users add values, which only an org-owned type
     # can host — a platform type is never open.
-    scope = TypeScope(kwargs.get("scope", TypeScope.platform))
     if kwargs.get("is_open") and scope is not TypeScope.org:
         raise ValueError(
             f"lookup type {kwargs.get('key')!r}: is_open=True requires "
             "scope='org' — platform types never accept org-added values"
         )
-    t = session.exec(
-        select(LookupType).where(LookupType.key == kwargs["key"])
-    ).first()
     if t:
-        if "scope" in kwargs and t.scope is not scope:
+        if explicit is not None and t.scope is not scope:
             # A silently ignored mismatch would let a host believe its
             # declaration took effect. Changing a type's scope moves ownership
             # of every value (platform rows become an unserved template, or

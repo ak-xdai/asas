@@ -263,6 +263,16 @@ def test_ensure_type_rejects_a_conflicting_scope(seeded):
             ensure_type(s, key="tagx", name="TagX", scope=TypeScope.platform)
 
 
+def test_ensure_type_rereg_of_open_org_type_may_omit_scope(seeded):
+    """The idempotent boot idiom: re-registering an existing open org type
+    without repeating scope= must judge is_open against the STORED scope, not
+    the platform default (which would make every such boot raise)."""
+    with Session(seeded) as s:
+        ensure_type(s, key="tagy", name="TagY", is_open=True, scope=TypeScope.org)
+        t = ensure_type(s, key="tagy", name="TagY", is_open=True)
+        assert t.scope is TypeScope.org
+
+
 def test_seed_org_lookups_bumps_type_version(seeded, vocab):
     """The read-API ETag keys on the type version: a seed that creates rows
     must bump it, or an org that cached a pre-seed (empty) response keeps
