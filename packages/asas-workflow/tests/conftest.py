@@ -14,7 +14,7 @@ import pytest
 from sqlmodel import Session, create_engine
 
 import asas_workflow
-from asas_workflow import definitions, events, registry
+from asas_workflow import definitions, engine, events, registry
 
 _TEST_URL = os.environ.get("TEST_DATABASE_URL")
 
@@ -31,6 +31,7 @@ def _clean_registries():
     registry._NAMESPACE_RESOLVERS.clear()
     registry._BINDABLE_PURPOSES.clear()
     registry._FLOOR_RESOLVER = None
+    engine._org_resolver = None
 
 
 @pytest.fixture()

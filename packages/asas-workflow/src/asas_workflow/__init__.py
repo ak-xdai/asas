@@ -30,6 +30,7 @@ from .engine import (  # noqa: F401
     EngineError,
     answer_info,
     cancel,
+    configure_org_resolver,
     decide,
     final_decision_of,
     open_instance,
@@ -72,7 +73,7 @@ from .registry import (  # noqa: F401
     subject_renderer,
 )
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 __all__ = [
     "__version__",
@@ -109,6 +110,7 @@ __all__ = [
     "get_active_definition",
     "get_binding",
     "migrate",
+    "configure_org_resolver",
     "open_instance",
     "reassign",
     "register_assignee_resolver",

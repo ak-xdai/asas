@@ -165,3 +165,63 @@ def test_validate_definition_rejects_unknown_resolver(session):
     spec = _simple_spec(key, "never_registered_principal")
     with pytest.raises(Exception):
         workflow.ensure_definition(session, spec)
+
+
+# ── the org axis reaches the floor (issue #31: audit defect T-4) ─────────────
+
+
+def test_instance_org_reaches_the_floor(session):
+    """Defect T-4: open_instance had no way to set ProcessInstance.org_id, so
+    both resolve_floor call sites always received None — the org-scoped
+    approver floor could never actually scope, and one org's approvals could
+    land in another org's inboxes. The org now arrives explicitly (or via the
+    resolver) and flows to the floor."""
+    seen_orgs = []
+
+    def per_org_floor(s, org_id=None):
+        seen_orgs.append(org_id)
+        return {900 + (org_id or 0)}
+
+    workflow.register_floor_resolver(per_org_floor)
+    key = _key()
+    _seed(session, _simple_spec(key, _principal()))  # empty resolution -> floor
+    instance = workflow.open_instance(
+        session,
+        process_key=key,
+        entity_type="project",
+        entity_id=10,
+        subject_snapshot={"title": "thing"},
+        initiated_by=1,
+        org_id=7,
+    )
+    assert instance.org_id == 7
+    assert seen_orgs == [7]  # the floor was asked FOR org 7, not unscoped
+    execution = instance.executions[-1]
+    assert {a.member_id for a in execution.assignees} == {907}
+
+
+def test_org_resolver_supplies_the_org_when_not_passed(session):
+    from asas_workflow import engine
+
+    workflow.register_floor_resolver(lambda s, org_id=None: {999})
+    workflow.configure_org_resolver(lambda s: 5)
+    try:
+        key = _key()
+        _seed(session, _simple_spec(key, _principal(3)))
+        instance = _open(session, key)
+        assert instance.org_id == 5
+        # explicit parameter beats the resolver
+        key2 = _key()
+        _seed(session, _simple_spec(key2, _principal(3)))
+        explicit = workflow.open_instance(
+            session,
+            process_key=key2,
+            entity_type="project",
+            entity_id=11,
+            subject_snapshot={"title": "thing"},
+            initiated_by=1,
+            org_id=8,
+        )
+        assert explicit.org_id == 8
+    finally:
+        engine._org_resolver = None
