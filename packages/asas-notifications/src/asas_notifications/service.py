@@ -157,6 +157,7 @@ def notify(
     link: Optional[str] = None,
     entity_type: Optional[str] = None,
     entity_id: Optional[int] = None,
+    org_id: Optional[int] = None,
     record: Any = None,
     category: Optional[Category] = None,
     urgency: Optional[Urgency] = None,
@@ -167,6 +168,10 @@ def notify(
     """Insert notification (+ delivery) rows in the caller's transaction.
 
     - Actor exclusion is built in: ``actor_user_id`` never notifies itself.
+    - Notifications are tenant-owned: ``org_id`` is stamped from the explicit
+      parameter, else the context resolver; with neither, ``ValueError`` at the
+      emit site — background producers acting *for* a tenant pass the org
+      explicitly (DR 0001 T4/T7).
     - **Whenever ``entity_type`` is given**, recipients run through the configured
       visibility filter — a notification must never leak a private record (the
       search-index rule). ``record`` is passed to the filter when the producer
@@ -193,6 +198,21 @@ def notify(
         raise LookupError(f"unregistered notification kind: {kind}")
     if _suppress_notify.get():
         return []
+    # Notifications are tenant-owned and ``Notification.org_id`` is NOT NULL.
+    # Stamping order (DR 0001 T4, issue #27): explicit parameter → context
+    # resolver → fail loud HERE, at the emit site, with the fix in the message
+    # — never as an engine-specific IntegrityError at flush, which would also
+    # take the producer's whole transaction down with it (audit defect T-2).
+    org = org_id
+    if org is None:
+        ctx = _context_resolver(session) if _context_resolver else None
+        org = ctx[1] if ctx else None
+    if org is None:
+        raise ValueError(
+            "notify() has no org for this emit: pass org_id= explicitly "
+            "(background jobs, CLI, boot sweeps) or configure the context "
+            "resolver — Notification.org_id is NOT NULL"
+        )
     cat = Category(category) if category else spec.category
     urg = Urgency(urgency) if urgency else spec.urgency
     rsn = Reason(reason) if reason else spec.reason
@@ -244,6 +264,12 @@ def notify(
                 select(Notification)
                 .where(
                     Notification.user_id == user_id,
+                    # The org axis is part of the coalesce identity (DR 0001
+                    # T5, defect T-6): where hosts' entity ids are not
+                    # globally unique, an org-2 emit must never fold into —
+                    # and overwrite — an org-1 row for the same (user, kind,
+                    # entity).
+                    Notification.org_id == org,
                     Notification.kind == kind,
                     Notification.entity_type == entity_type,
                     Notification.entity_id == entity_id,
@@ -268,16 +294,11 @@ def notify(
         if not ids:
             return updated
 
-    # org_id comes from the configured context resolver when available; a host
-    # with its own ORM tenancy listener (Teamy) stamps the same value anyway —
-    # producers never pass it.
-    ctx = _context_resolver(session) if _context_resolver else None
-    org_kw = {"org_id": ctx[1]} if ctx else {}
     created: list[Notification] = []
     for user_id in ids:
         n = Notification(
             user_id=user_id,
-            **org_kw,
+            org_id=org,
             kind=kind,
             category=cat,
             urgency=urg,

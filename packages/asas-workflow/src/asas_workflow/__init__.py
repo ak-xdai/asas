@@ -31,6 +31,7 @@ from .engine import (
     EngineError,
     answer_info,
     cancel,
+    configure_org_resolver,
     decide,
     final_decision_of,
     open_instance,
@@ -73,7 +74,7 @@ from .registry import (  # noqa: F401
     subject_renderer,
 )
 
-__version__ = "0.11.1"
+__version__ = "0.11.2"
 
 __all__ = [
     "ADMIN_FLOOR",
@@ -98,11 +99,13 @@ __all__ = [
     "ProcessTransition",
     "TransitionSpec",
     "Verdict",
+    "__version__",
     "active_definitions_for_purpose",
     "answer_info",
     "bindable_purposes",
     "cancel",
     "clear_registered_specs",
+    "configure_org_resolver",
     "decide",
     "emit",
     "ensure_definition",

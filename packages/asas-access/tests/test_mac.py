@@ -256,3 +256,64 @@ def test_ensure_clearance_levels_idempotent(session):
     _seed_levels(session)
     rows = session.exec(select(ClearanceLevel).where(ClearanceLevel.org_id == ORG)).all()
     assert next(r for r in rows if r.code == "internal").name == "Org-wide"
+
+
+# ── the org axis fails closed (issue #29: audit defects T-3 and T-9) ─────────
+
+
+def test_marked_record_without_org_denies_the_foreign_caller(session):
+    """Defect T-3: a record carrying no org_id used to have the CALLER's org
+    substituted — an org-2 subject viewing an org-1 record looked up markings
+    under org 2, found none, and a marked-only record read as unclassified:
+    access granted. The record's stamps decide, whatever org the caller is
+    from."""
+    access.register_classified_entity("project")
+    _seed_levels(session, org_id=ORG)
+    _subject_source(session)
+    orphan = _record(None, org_id=None)  # child row that never carried the org
+    session.add(
+        RecordMarking(
+            org_id=ORG, entity_type="project", record_id=orphan.id, marking_code="hr"
+        )
+    )
+    session.commit()
+    access.invalidate_record_markings(session)
+    outsider = make_user("member", user_id=99, org_id=2)  # holds no markings
+    assert not access.mac_allows(session, outsider, "project", orphan)
+
+
+def test_stamped_record_with_unresolvable_org_denies_not_caller_catalog(session):
+    """Defect T-3, rank half: with the caller's org substituted, the record's
+    classification was ranked against the CALLER's org catalog — per-org rank
+    integers are not comparable across orgs. Unresolvable record org ⇒ deny."""
+    access.register_classified_entity("project")
+    _seed_levels(session, org_id=2)  # the caller's own catalog knows the code
+    _subject_source(session)
+    caller = make_user("member", user_id=42, org_id=2)
+    _assign(session, caller, level="restricted")
+    stamped = _record("restricted", org_id=None)
+    assert not access.mac_allows(session, caller, "project", stamped)
+    # the explicit parameter resolves it: under org 2's catalog the caller
+    # holds the top rank, so the same record now passes
+    assert access.mac_allows(
+        session, caller, "project", stamped, record_org_id=2
+    )
+
+
+def test_phantom_levels_never_survive_a_rollback(session):
+    """Defect T-9: ensure_clearance_levels invalidated the process-global
+    level cache at mutation time — a reader between the mutation and a
+    rollback cached rows that officially never existed, and served them to
+    every session afterwards. Invalidation now waits for the commit."""
+    _seed_levels(session, org_id=ORG)  # commits; listener fires; cache cleared
+    warm = mac._levels(session)
+    assert "phantom" not in warm.get(ORG, {})
+    access.ensure_clearance_levels(session, ORG, {"phantom": ("Phantom", 99)})
+    mid = mac._levels(session)  # a reader inside the open transaction
+    assert "phantom" not in mid.get(ORG, {})  # the old cache still serves
+    session.rollback()
+    after = mac._levels(session)
+    assert "phantom" not in after.get(ORG, {})  # nothing phantom was cached
+    access.ensure_clearance_levels(session, ORG, {"phantom": ("Phantom", 99)})
+    session.commit()  # NOW the listener invalidates
+    assert mac._levels(session)[ORG]["phantom"] == 99
