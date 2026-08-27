@@ -446,6 +446,11 @@ def test_mcp_endpoint_verifies_its_token(monkeypatch):
         # monkeypatch restores the env var, but not these module objects — they
         # would keep the token and leak into any later test that does not use
         # the app_module fixture.
-        monkeypatch.delenv("MCP_TOKEN", raising=False)
+        #
+        # `undo()` rather than `delenv`: it puts MCP_TOKEN back to whatever it
+        # was *before* this test, which is not necessarily unset. Deleting it
+        # and then reloading would initialise both modules from a state the
+        # process was never actually in.
+        monkeypatch.undo()
         importlib.reload(app.config)
         importlib.reload(mcp_wiring)
