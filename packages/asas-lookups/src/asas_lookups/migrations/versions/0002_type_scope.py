@@ -9,6 +9,14 @@ values, which only an org-owned type can host, so stamping those ``platform``
 would turn every org add into a 403. Hosts declare ``scope='org'`` for their
 vocabularies at registration.
 
+**Required host step after this upgrade**: for every org-scoped type the
+platform rows become an unserved template, so a host upgrading a database
+that already has organizations MUST call ``seed_org_lookups(session, org_id)``
+once per existing org (idempotent). Until then those orgs read empty lists —
+and a stored template-only code answers 404 — for every org-scoped type,
+including legacy open types this revision converts. This migration cannot do
+it: org ids live in the host's own tables, which this package never sees.
+
 Dual-engine rule: plain VARCHAR (no native enum), no server defaults — the
 column is added nullable, backfilled, then tightened to NOT NULL via batch
 mode so SQLite's table-recreate path works the same as Postgres ALTER.

@@ -24,7 +24,11 @@ Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASI
   a template-only code answers 404), managed from platform scope, and copied
   per org by the new exported **`seed_org_lookups(session, org_id)`** — called
   by the host at org creation, presence-idempotent per (type, code) so
-  backfilling existing orgs is one call. Hierarchy parent pointers and
+  backfilling existing orgs is one call. **Required upgrade step**: a host
+  whose database already has organizations MUST run it once per existing org
+  after `migrate()` — the migration converts legacy open types to org scope
+  but cannot enumerate the host's orgs, and until seeded those orgs read
+  empty lists for every org-scoped type. Hierarchy parent pointers and
   supersede links are remapped to the org's own rows — fresh copies or values
   the org already had. A seed that creates rows bumps the type `version` so read-API ETags
   invalidate. Template drift is accepted by design; platform types keep
