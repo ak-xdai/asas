@@ -97,6 +97,17 @@ def ensure_type(session: Session, **kwargs) -> LookupType:
         select(LookupType).where(LookupType.key == kwargs["key"])
     ).first()
     if t:
+        if "scope" in kwargs and t.scope is not scope:
+            # A silently ignored mismatch would let a host believe its
+            # declaration took effect. Changing a type's scope moves ownership
+            # of every value (platform rows become an unserved template, or
+            # vice versa) — that is a deliberate data migration, never an
+            # ensure_type side effect.
+            raise ValueError(
+                f"lookup type {kwargs['key']!r} already exists with scope "
+                f"'{t.scope.value}', not '{scope.value}' — changing a type's "
+                "scope is a data migration, not something ensure_type does"
+            )
         return t
     t = LookupType(**kwargs)
     session.add(t)

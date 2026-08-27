@@ -244,6 +244,24 @@ def test_seed_remaps_supersede_pointer_to_org_copy(seeded, vocab, org):
         assert rows["cobol"].status == LookupStatus.deprecated
         assert rows["cobol"].superseded_by_id == rows["python"].id
 
+    org.org_id = 7  # and the follow actually reaches the org's own successor
+    with Session(seeded) as s:
+        type_ = service.get_type(s, vocab)
+        assert service.get_value_read(s, type_, "cobol", "en", True).label == "Python"
+
+
+def test_ensure_type_rejects_a_conflicting_scope(seeded):
+    """A re-registration whose explicit scope disagrees with the stored one is
+    an error, not a silent no-op: changing scope moves ownership of every
+    value, which is a data migration ensure_type must never imply."""
+    with Session(seeded) as s:
+        ensure_type(s, key="tagx", name="TagX", scope=TypeScope.org)
+        # same declaration is idempotent; omitted scope trusts the stored one
+        assert ensure_type(s, key="tagx", name="TagX", scope=TypeScope.org).scope is TypeScope.org
+        assert ensure_type(s, key="tagx", name="TagX").scope is TypeScope.org
+        with pytest.raises(ValueError, match="scope"):
+            ensure_type(s, key="tagx", name="TagX", scope=TypeScope.platform)
+
 
 def test_seed_org_lookups_bumps_type_version(seeded, vocab):
     """The read-API ETag keys on the type version: a seed that creates rows

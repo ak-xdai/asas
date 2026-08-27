@@ -421,6 +421,17 @@ def _apply_translations(
             )
 
 
+def _reject_platform_org_write(type_: LookupType) -> None:
+    """The one 403 both write paths share: an org touching a platform type."""
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"'{type_.key}' is a platform type — its values are "
+            "read-only for organizations"
+        ),
+    )
+
+
 def _value_for_write(session: Session, type_: LookupType, code: str) -> LookupValue:
     """Resolve the row a mutation may touch (issue #24; DR 0001 rule T4 — the
     write path never reuses the read path's selection). ``_value_by_code``
@@ -439,13 +450,7 @@ def _value_for_write(session: Session, type_: LookupType, code: str) -> LookupVa
     """
     org = _current_org(session)
     if org is not None and type_.scope == TypeScope.platform:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"'{type_.key}' is a platform type — its values are "
-                "read-only for organizations"
-            ),
-        )
+        _reject_platform_org_write(type_)
     base = select(LookupValue).where(
         LookupValue.type_id == type_.id, LookupValue.code == code
     )
@@ -478,13 +483,7 @@ def create_value(
     # property in full — org context may not ADD values either (previously an
     # org could mint its own row on any type as long as the code was free).
     if type_.scope == TypeScope.platform and _current_org(session) is not None:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"'{type_.key}' is a platform type — its values are "
-                "read-only for organizations"
-            ),
-        )
+        _reject_platform_org_write(type_)
 
     if not code:
         # Derive a stable code from the English (or first) label for open lists.

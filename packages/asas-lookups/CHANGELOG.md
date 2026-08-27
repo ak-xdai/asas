@@ -31,6 +31,10 @@ Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASI
   automatic propagation.
 - `LookupTypeCreate`/`LookupTypeRead` carry `scope` (typed as `TypeScope`,
   so an unknown scope is a schema-level 422); `TypeScope` is exported.
+- `ensure_type` raises when a re-registration's explicit `scope` disagrees
+  with the stored one — changing a type's scope moves ownership of every
+  value, which is a data migration, never a silent side effect. Omitting
+  `scope` keeps trusting the stored value.
 
 ## 0.12.1 — 2026-08-27
 
