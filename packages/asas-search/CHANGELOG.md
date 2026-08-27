@@ -1,11 +1,11 @@
 # Changelog — `asas-search`
 
-Versions follow semver, and the git tag matches this file: `asas-search/v0.11.0`.
+Versions follow semver, and the git tag matches this file: `asas-search/v0.11.1`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
-## 0.12.0 — 2026-08-27
+## 0.11.1 — 2026-08-27
 
 - Documented three things that made a deep-search tier easy to wire inertly: an extractor is called as `extractor(session)` and must yield **every** document for its source (not one record's); registering an extractor does **not** keep the index fresh — a host also needs a `rebuild()` backfill and ORM listeners calling `upsert`/`delete`; and `org_of` returning `None` is a *filter* matching only `None`-org documents, not the absence of one. Each failure mode leaves the index permanently empty with no error, and every *negative* search assertion still passes (Teamy TEAMY-809).
 

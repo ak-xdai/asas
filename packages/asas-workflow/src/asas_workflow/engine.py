@@ -477,11 +477,12 @@ def final_decision_of(
     flushed when a completion callback runs, so callbacks can attribute the
     outcome to its decider (WXL-215/216 both need this).
 
-    **This does not return the verdict**, which the name invites you to expect.
-    The verdict reaches a completion callback as its third argument
-    (``outcome``), and is one of the end node's ``config["outcome"]`` or
-    :data:`REJECTED_OUTCOME`. Reading a truthiness test over this tuple as
-    "was it approved" is wrong in both directions.
+    **This does not tell you how the instance ended**, which the name invites
+    you to expect. What settles that is the *completion outcome* — the end
+    node's configured ``config["outcome"]``, or :data:`REJECTED_OUTCOME` when a
+    negative verdict had no matching transition — and it reaches a completion
+    callback as its third argument. It is not ``NodeDecision.verdict``, and a
+    truthiness test over this tuple is wrong in both directions.
     """
     row = session.exec(
         select(NodeDecision)

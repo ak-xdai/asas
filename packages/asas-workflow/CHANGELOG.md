@@ -1,15 +1,15 @@
 # Changelog — `asas-workflow`
 
-Versions follow semver, and the git tag matches this file: `asas-workflow/v0.11.0`.
+Versions follow semver, and the git tag matches this file: `asas-workflow/v0.11.1`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
-## 0.12.0 — 2026-08-27
+## 0.11.1 — 2026-08-27
 
-- **`validate_definition` now rejects an end node with no `config['outcome']`.** The engine reads that key unguarded when an instance reaches the node, so omitting it raised a bare `KeyError` from inside the engine — at decision time, far from the definition, and only on the branch that happened to reach that end. It is now a boot-time error naming the node. **Action for hosts:** every `NodeType.end` node needs `config={"outcome": "..."}`; definitions that already have one are unaffected (Teamy TEAMY-808).
+- Added a test for the end-node `config["outcome"]` check. It was filed as a missing validation and is not one: `validate_definition` has always rejected an end node without an outcome — the check simply had no test, and a second copy of it was briefly added before review caught the duplicate. **No behaviour change** (Teamy TEAMY-808).
 - `REJECTED_OUTCOME` is now exported. Hosts comparing `instance.outcome` had to restate the literal `"rejected"`, where a typo silently reads every rejection as an approval (Teamy TEAMY-808).
-- Documented two contracts that existed only in the engine's internals: a completion callback **runs inside the engine's transaction and must not commit** (committing discards the rollback-on-failure guarantee it exists to provide), and `final_decision_of` returns `(actor_id, comment)` — **not** the verdict, which reaches the callback as its third argument (Teamy TEAMY-808).
+- Documented two contracts that existed only in the engine's internals: a completion callback **runs inside the engine's transaction and must not commit** (committing discards the rollback-on-failure guarantee it exists to provide), and `final_decision_of` returns `(actor_id, comment)` — **not** the completion outcome, which is what settles how an instance ended and reaches the callback as its third argument (Teamy TEAMY-808).
 
 ## 0.11.0 — 2026-08-25
 

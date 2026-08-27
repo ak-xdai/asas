@@ -26,7 +26,7 @@ from .seeding import (  # noqa: F401
 )
 from .service import configure_org_resolver
 
-__version__ = "0.12.0"
+__version__ = "0.11.1"
 
 __all__ = [
     "Routers",

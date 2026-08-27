@@ -1,6 +1,6 @@
 # Changelog — `asas-notifications`
 
-Versions follow semver, and the git tag matches this file: `asas-notifications/v0.12.0`.
+Versions follow semver, and the git tag matches this file: `asas-notifications/v0.13.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).

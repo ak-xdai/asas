@@ -150,11 +150,14 @@ def make_provider(
     the lexical arm matched).
 
     ``org_of(session, user)`` returns the org whose documents this caller may
-    search. **Returning ``None`` is a filter, not the absence of one**: it
-    matches only documents written with a ``None`` ``org_id``. A single-tenant
-    host that returns ``None`` while its extractors stamp a real ``org_id``
-    therefore gets an empty result set on every query, for ever, with no error —
-    so return the same value the documents carry, whatever that is.
+    search. **Returning ``None`` fails closed**: the provider returns no hits at
+    all rather than searching across tenants — it does *not* fall back to
+    matching documents whose ``org_id`` is NULL.
+
+    So ``None`` reads like "no scoping" and behaves like "no results". A
+    single-tenant host that returns it gets an empty deep tier on every query,
+    for ever, with no error and with a fully populated index. Return the same
+    value the extractors stamp on the documents, whatever that is.
 
     ``org_of(session, user)`` supplies the caller's org (WXL-238) — the package
     stays model-free; app wiring reads its tenant context. No org ⇒ no deep hits

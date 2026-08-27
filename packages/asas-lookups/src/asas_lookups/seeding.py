@@ -91,6 +91,7 @@ def ensure_type(
     is_open: bool = False,
     is_hierarchical: bool = False,
     code_system: Optional[str] = None,
+    default_sort: SortMode = SortMode.label,
     **extra: Any,
 ) -> LookupType:
     """Create the lookup type if it does not exist; return it either way.
@@ -104,7 +105,11 @@ def ensure_type(
 
     ``name`` defaults to ``key`` so a caller seeding its own vocabulary can
     supply one argument. ``is_open`` marks a type callers may extend at runtime
-    (skills, universities) rather than a closed list.
+    (skills, universities) rather than a closed list. ``default_sort`` picks
+    label order or explicit ``sort_order``.
+
+    ``**extra`` remains only for model fields with no reason to be promoted; the
+    parameters above are the contract, and are what ``inspect.signature`` shows.
 
     Idempotent, and **matched on key alone**: an existing type is returned
     unchanged, so this never rewrites a deployment's edited label.
@@ -119,6 +124,7 @@ def ensure_type(
         is_open=is_open,
         is_hierarchical=is_hierarchical,
         code_system=code_system,
+        default_sort=default_sort,
         **extra,
     )
     session.add(t)

@@ -15,11 +15,13 @@ from asas_workflow import (
 
 
 def test_end_node_without_outcome_is_rejected_at_validation():
-    """The engine reads config["outcome"] unguarded when an instance ends here.
+    """Pins a check that already existed and had no test.
 
-    Omitting it used to surface as a bare KeyError from inside the engine, at
-    decision time, and only for the branch that happened to reach that end node.
-    Validation turns it into a boot-time error naming the node.
+    The engine reads `config["outcome"]` unguarded when an instance reaches an
+    end node, so without validation it would be a bare KeyError from inside the
+    engine at decision time. `validate_definition` has always caught it — that
+    was verified the hard way, by adding a second copy of the check and having
+    review point out the duplicate. The test is what was missing.
     """
     spec = DefinitionSpec(
         key="no_outcome",
@@ -31,7 +33,7 @@ def test_end_node_without_outcome_is_rejected_at_validation():
         ),
         transitions=(TransitionSpec("start", "done"),),
     )
-    with pytest.raises(ValueError, match="needs config\\['outcome'\\]"):
+    with pytest.raises(ValueError, match="needs an outcome"):
         validate_definition(spec)
 
 
