@@ -111,9 +111,14 @@ def ensure_value(
     value healed), False otherwise — callers use this to know whether to bump the
     type ``version`` (which busts read-API ETags).
     """
+    # Platform rows only (issue #24; DR 0001 T7): the seed runs with no org
+    # context and owns only org-less rows — an org-minted row with the same
+    # code must not suppress the platform default forever (audit defect T-5).
     existing = session.exec(
         select(LookupValue).where(
-            LookupValue.type_id == type_id, LookupValue.code == code
+            LookupValue.type_id == type_id,
+            LookupValue.code == code,
+            LookupValue.org_id.is_(None),
         )
     ).first()
     if existing:
@@ -186,7 +191,9 @@ def seed_lookups(session: Session) -> None:
     for code in _SALUTATION_IN_NAME:
         v = session.exec(
             select(LookupValue).where(
-                LookupValue.type_id == salutation.id, LookupValue.code == code
+                LookupValue.type_id == salutation.id,
+                LookupValue.code == code,
+                LookupValue.org_id.is_(None),  # the seed owns platform rows only
             )
         ).first()
         if v is not None and "show_in_name" not in (v.meta or {}):

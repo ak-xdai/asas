@@ -358,6 +358,40 @@ def _apply_translations(
             )
 
 
+def _value_for_write(session: Session, type_: LookupType, code: str) -> LookupValue:
+    """Resolve the row a mutation may touch (issue #24; DR 0001 rule T4 — the
+    write path never reuses the read path's selection). ``_value_by_code``
+    answers "what does the caller *see*": the org's row OR the global fallback.
+    Mutating that fallback is how one org's edit used to land on the platform
+    row every tenant shares (audit defect T-1).
+
+    With org context the caller may edit only rows their org owns; a code that
+    resolves to a platform row is read-only for organizations (403). Without
+    context (platform scope — seeds, boot, platform admin) the global row only.
+    """
+    org = _current_org(session)
+    base = select(LookupValue).where(
+        LookupValue.type_id == type_.id, LookupValue.code == code
+    )
+    if org is not None:
+        own = session.exec(base.where(LookupValue.org_id == org)).first()
+        if own:
+            return own
+        if session.exec(base.where(LookupValue.org_id.is_(None))).first() is not None:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"'{code}' is a platform value and is read-only for "
+                    "organizations"
+                ),
+            )
+        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = session.exec(base.where(LookupValue.org_id.is_(None))).first()
+    if not value:
+        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    return value
+
+
 def create_value(
     session: Session,
     type_: LookupType,
@@ -428,9 +462,7 @@ def update_value(
     sort_order: Optional[int],
     meta: Optional[dict],
 ) -> LookupValue:
-    value = _value_by_code(session, type_.id, code)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = _value_for_write(session, type_, code)
     if translations is not None:
         _apply_translations(session, value, translations)
     if is_default is not None:
@@ -456,9 +488,7 @@ def deprecate_value(
     valid_to,
     superseded_by: Optional[str],
 ) -> LookupValue:
-    value = _value_by_code(session, type_.id, code)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = _value_for_write(session, type_, code)
     value.status = LookupStatus.deprecated
     value.valid_to = valid_to or datetime.utcnow().date()
     if superseded_by:
@@ -499,9 +529,7 @@ def _alias_present(value: LookupValue, alias: str) -> bool:
 def add_alias(
     session: Session, type_: LookupType, code: str, alias: str, lang: Optional[str]
 ) -> LookupValue:
-    value = _value_by_code(session, type_.id, code)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = _value_for_write(session, type_, code)
     alias = alias.strip()
     if not alias:
         raise HTTPException(status_code=422, detail="alias must not be blank")
@@ -522,9 +550,7 @@ def remove_alias(
     ``add_alias`` checks presence (stripped, case-insensitive) so any alias that
     add treats as already-there can be removed by that same spelling. Idempotent:
     removing an alias that isn't there is a no-op, not an error."""
-    value = _value_by_code(session, type_.id, code)
-    if not value:
-        raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
+    value = _value_for_write(session, type_, code)
     key = alias.strip().lower()
     rows = [a for a in value.aliases if a.alias.strip().lower() == key]
     if not rows:
@@ -545,10 +571,10 @@ def merge_values(
     is kept as an alias on the target so search still finds it."""
     if code == into:
         raise HTTPException(status_code=422, detail="Cannot merge a value into itself")
-    source = _value_by_code(session, type_.id, code)
-    target = _value_by_code(session, type_.id, into)
-    if not source or not target:
-        raise HTTPException(status_code=404, detail="Source or target code not found")
+    # Both sides are mutations (source deprecates, target gains aliases), so
+    # both must be writable by the caller — for an org, both org-owned.
+    source = _value_for_write(session, type_, code)
+    target = _value_for_write(session, type_, into)
     # Seed from the target's persisted aliases, then track additions locally:
     # rows added via session.add aren't in target.aliases until commit, so two
     # source translations sharing a label (e.g. "Taxi" en + fr) would both pass
