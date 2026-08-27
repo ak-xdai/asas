@@ -1,9 +1,20 @@
 # Changelog — `asas-workflow`
 
-Versions follow semver, and the git tag matches this file: `asas-workflow/v0.11.0`.
+Versions follow semver, and the git tag matches this file: `asas-workflow/v0.11.1`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.11.1 — 2026-08-27
+
+- **The org axis now reaches the approver floor** (issue #31, audit defect
+  T-4). `ProcessInstance.org_id` existed but `open_instance` had no way to set
+  it, so both `resolve_floor(session, instance.org_id)` call sites always
+  resolved the unscoped floor — the floor exists precisely so one org's
+  approvals never land in another org's inboxes. `open_instance` gains an
+  `org_id=` parameter, with a new `configure_org_resolver` hook (the DR 0001
+  T2 resolver shape) as fallback; `None` stays a real platform scope.
+  Additive — existing callers are unchanged.
 
 ## 0.11.0 — 2026-08-25
 

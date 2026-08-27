@@ -11,7 +11,7 @@ context (admin?) is passed in by the caller.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from sqlmodel import Session, select
 
@@ -75,6 +75,23 @@ def _select_next(
 
 # ── opening ────────────────────────────────────────────────────────────────────
 
+# (session) -> org of the current unit of work, or None (platform scope).
+# The T2 resolver shape from DR 0001 — same contract as asas-lookups.
+_org_resolver = None
+
+# open_instance's "org_id not passed" sentinel: an explicit org_id=None is a
+# deliberate platform-scoped instance and must never be replaced by the
+# resolver's org (the asas-ratelimit clock-sentinel pattern).
+_ORG_UNSET: Any = object()
+
+
+def configure_org_resolver(fn) -> None:
+    """Host hook supplying the current org (``Callable[[Session], Optional[int]]``,
+    or None to unconfigure). Consulted per ``open_instance`` when no explicit
+    ``org_id`` is passed."""
+    global _org_resolver
+    _org_resolver = fn
+
 
 def open_instance(
     session: Session,
@@ -88,6 +105,7 @@ def open_instance(
     data: Optional[dict] = None,
     initiated_by: Optional[int] = None,
     supersedes_id: Optional[int] = None,
+    org_id: Optional[int] = _ORG_UNSET,
 ) -> ProcessInstance:
     """Open a walk. Callers name either an exact ``process_key``, or a ``purpose``
     (+ optional ``bound_to`` subject) and let binding resolution pick the variant
@@ -106,10 +124,18 @@ def open_instance(
             "entity_mismatch",
             f"Process {label!r} runs on {definition.entity_type!r}, got {entity_type!r}",
         )
+    if org_id is _ORG_UNSET:
+        org_id = _org_resolver(session) if _org_resolver is not None else None
     instance = ProcessInstance(
         definition_id=definition.id,
         entity_type=entity_type,
         entity_id=entity_id,
+        # Stamped explicit-parameter-first, then the resolver (DR 0001 T4,
+        # issue #31 / audit defect T-4): with org_id always None, both
+        # resolve_floor call sites resolved the UNSCOPED approver floor —
+        # the floor exists precisely so one org's approvals never land in
+        # another org's inboxes. None remains a real platform scope.
+        org_id=org_id,
         subject_snapshot=subject_snapshot or {},
         data=dict(data or {}),
         initiated_by=initiated_by,
