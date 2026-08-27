@@ -75,6 +75,16 @@ def _sla_sweep(session: Session, payload: dict | None = None, **_kwargs) -> None
     one. That check is the idempotence, and it is why it is a query against the
     notifications table rather than a flag on the job.
 
+    **It is a read-then-write, and therefore not atomic.** Two sweeps running
+    concurrently — an expired lease reclaimed while the original is still
+    working — can both see no row and both insert. A production host closes that
+    with a uniqueness constraint on the delivery key and an insert-on-conflict,
+    so the database refuses the second write; this host keeps the query because
+    the point here is *that* idempotence must be designed, and a schema
+    constraint would put the mechanism in a migration rather than in front of
+    the reader. Do not copy the read-then-write into a system where the race
+    matters.
+
     (``notify(coalesce_unread=True)`` is the package's own answer to the same
     problem, but it only engages when the kind has no delivery channels — this
     kind has one, so it would silently not apply. Worth knowing before reaching

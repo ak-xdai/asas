@@ -121,10 +121,16 @@ def require_user(user: Optional[Agent] = Depends(get_current_user)) -> Agent:
     *host* decides who may reach it. A package that shipped its own guard would
     be making an authentication decision on behalf of every future host.
     """
-    if not settings.enable_fake_auth:
-        # Open mode: the whole app is anonymous, so an admin router guard has
-        # nothing to check. Stated explicitly rather than left to fall through.
-        return None  # type: ignore[return-value]
+    # No `enable_fake_auth` escape hatch here, deliberately. Returning None when
+    # auth is off made this guard a pass-through, so the admin router's
+    # state-changing routes (create/deprecate/merge lookup values) were reachable
+    # anonymously in the default posture — while CLAUDE.md claimed this module
+    # "fails closed". A guard that demonstrates nothing is worse than no guard in
+    # a file people read to learn the seam.
+    #
+    # Consequence, and it is the right one: with auth off nobody can reach an
+    # admin surface at all, because there is no identity to admit. Set
+    # ENABLE_FAKE_AUTH=1 to exercise those routes.
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required"

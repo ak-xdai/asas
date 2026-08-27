@@ -110,11 +110,27 @@ def test_host_schema_does_not_create_package_tables(database_url, monkeypatch, t
     importlib.reload(app.config)
     db = importlib.reload(app.db)
 
+    # A probe table registered into the shared metadata, so this test cannot
+    # pass merely because no foreign tables happened to be registered yet. It
+    # stands in for the package tables and makes the assertion independent of
+    # import order.
+    from sqlmodel import SQLModel
+
+    probe = "zz_probe_not_owned_by_this_host"
+    if probe not in SQLModel.metadata.tables:
+        sa.Table(probe, SQLModel.metadata, sa.Column("id", sa.Integer, primary_key=True))
+
     db.create_host_schema(db.engine)
 
     inspector = sa.inspect(db.engine)
     host_owned = {t.name for t in db.host_tables()}
     created = set(inspector.get_table_names())
+
+    assert probe in SQLModel.metadata.tables, "the probe never reached the registry"
+    assert probe not in created, (
+        "create_host_schema created a table registered in SQLModel.metadata that "
+        "the host does not own — the tables= guard is gone."
+    )
 
     leaked = created - host_owned
     assert not leaked, (
@@ -169,3 +185,27 @@ def test_deep_search_tier_engages_only_on_postgres(client, app_module):
 
     tiers = client.get("/health").json()["tiers"]
     assert ("deep" in tiers["search"]) is is_postgres
+
+
+def test_admin_surface_is_not_anonymously_reachable(client):
+    """The host's guard, applied at include_router time, actually guards.
+
+    This had no test, which is how `require_user` came to return None when fake
+    auth was off — making the guard a pass-through and leaving the lookup admin
+    router's state-changing routes open in the default posture, while CLAUDE.md
+    claimed the module fails closed.
+
+    The read surface stays open; only the admin one is gated.
+    """
+    assert client.get("/lookups/ticket_priority").status_code == 200
+
+    # POST, not GET: the admin routes are state-changing, and a method that the
+    # route does not accept 405s before the dependency ever runs — which would
+    # have made this test pass without exercising the guard.
+    created = client.post(
+        "/admin/lookup-types", json={"key": "sneaky", "name": "Sneaky"}
+    )
+    assert created.status_code == 401, (
+        f"admin surface answered {created.status_code} anonymously — the "
+        f"include-time guard is a pass-through"
+    )

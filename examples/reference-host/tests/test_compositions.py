@@ -151,11 +151,20 @@ def test_search_never_returns_a_ticket_the_caller_cannot_see(app_module, agents)
     """
     with Session(app_module.engine) as session:
         _ticket(session, title="Restricted incident", classification_code="restricted")
+        # Positive control, on every engine. Without it both assertions here are
+        # negative, and a provider returning nothing for an unrelated reason
+        # would pass while proving no MAC guarantee at all.
+        _ticket(session, title="Restricted printer tray")
         viewer = session.get(type(agents["viewer"]), agents["viewer"].id)
 
         results = asas_search.search(session, viewer, "Restricted")
+        titles = {h.title for h in results.get("ticket") or []}
 
-        assert not results.get("ticket"), (
+        assert "Restricted printer tray" in titles, (
+            "search returned nothing at all — the negative assertion below would "
+            "have passed without exercising need-to-know"
+        )
+        assert "Restricted incident" not in titles, (
             "a ticket classified above the caller's clearance was returned by search"
         )
 
@@ -170,6 +179,10 @@ def test_internal_note_is_never_searchable(app_module, agents):
         _ticket(session, title="Laptop swap", internal_note="ZZQX customer is hostile")
         admin = session.get(type(agents["admin"]), agents["admin"].id)
 
+        # Positive control first: the ticket IS findable by its title, so a nil
+        # result for the note text means the note is absent from the index —
+        # not that search is broken.
+        assert asas_search.search(session, admin, "Laptop").get("ticket")
         assert not asas_search.search(session, admin, "ZZQX").get("ticket")
 
 
@@ -421,12 +434,18 @@ def test_mcp_endpoint_verifies_its_token(monkeypatch):
     import importlib
 
     import app.config
-
-    importlib.reload(app.config)
     from app.wiring import mcp as mcp_wiring
 
+    importlib.reload(app.config)
     importlib.reload(mcp_wiring)
-
-    verifier = mcp_wiring._StaticTokenVerifier()
-    assert asyncio.run(verifier.verify_token("secret")) is not None
-    assert asyncio.run(verifier.verify_token("wrong")) is None
+    try:
+        verifier = mcp_wiring._StaticTokenVerifier()
+        assert asyncio.run(verifier.verify_token("secret")) is not None
+        assert asyncio.run(verifier.verify_token("wrong")) is None
+    finally:
+        # monkeypatch restores the env var, but not these module objects — they
+        # would keep the token and leak into any later test that does not use
+        # the app_module fixture.
+        monkeypatch.delenv("MCP_TOKEN", raising=False)
+        importlib.reload(app.config)
+        importlib.reload(mcp_wiring)

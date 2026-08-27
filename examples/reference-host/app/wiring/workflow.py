@@ -31,6 +31,7 @@ import asas_workflow as workflow
 from sqlmodel import Session, select
 
 from ..models import Agent, Ticket
+from .access import ENTITY
 from .notifications import KIND_ESCALATION_DECIDED, KIND_ESCALATION_REQUESTED
 
 PROCESS_KEY = "ticket_escalation"
@@ -89,12 +90,20 @@ def _change_approvers(session, entity_type: str, entity_id: int) -> set:
     hold, and exactly why the resolver is a host callback.
     """
     ticket = session.get(Ticket, entity_id)
+    if ticket is None:
+        # No subject, no approvers. Returning every admin here would route an
+        # approval for a record nobody can look at.
+        return set()
+
     approvers = {
         agent.id
         for agent in session.exec(select(Agent).where(Agent.role == "admin")).all()
+        # **MAC has no admin floor.** An admin without the clearance cannot see
+        # this ticket, so asking them to approve it would both leak its existence
+        # and block the process on someone who cannot act.
+        if asas_access.mac_allows(session, agent, ENTITY, ticket)
     }
-    if ticket is not None and ticket.assignee_id in approvers:
-        approvers.discard(ticket.assignee_id)
+    approvers.discard(ticket.assignee_id)
     return approvers
 
 

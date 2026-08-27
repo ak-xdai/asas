@@ -369,6 +369,18 @@ def check_hooks(report: Report) -> None:
         for hook in spec.hooks:
             owner = _import(hook.module)
             if owner is None:
+                # The root package imported (checked above) but the module that
+                # owns this hook did not. Skipping would report success over a
+                # package we could not actually inspect — the same silent pass
+                # this tool exists to prevent.
+                report.add(
+                    Level.FAIL,
+                    spec.module,
+                    "hooks",
+                    f"{hook.module} could not be imported, so {hook.setter} could "
+                    f"not be checked. The package is installed but not loadable.",
+                    fix=f"Fix the import error in {hook.module}, then re-run.",
+                )
                 continue
             if not hasattr(owner, hook.state_attr):
                 report.add(

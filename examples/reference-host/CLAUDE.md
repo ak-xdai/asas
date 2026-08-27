@@ -43,8 +43,15 @@ growing a second Teamy.
 
 - **`app/fake_auth.py`.** It is a static token map with no secret, no expiry and
   no hashing. It exists to show the *seam*, and it refuses to arm without
-  `ENABLE_FAKE_AUTH=1` so an accidental copy fails closed. Authentication is
-  deliberately not an Asas package.
+  `ENABLE_FAKE_AUTH=1`. Authentication is deliberately not an Asas package.
+
+  Note what "fails closed" does and does not mean here: without the flag there
+  is no identity, so `require_user` admits nobody and the **admin surfaces are
+  unreachable** — the read surface and the ticket routes stay open. An earlier
+  version returned `None` in that branch, which made the guard a pass-through
+  and left the lookup admin router's state-changing routes anonymous. A guard
+  that demonstrates nothing is worse than no guard in a file people read to
+  learn the seam.
 - **`create_all` in `app/db.py`** — copy the `tables=` argument, not the
   approach. A real host owns an Alembic chain.
 
