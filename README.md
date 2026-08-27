@@ -57,6 +57,16 @@ Reading the table:
    host's historical migrations must have created the tables before `migrate()` looks for them.
    Adoption is shape-verified — a host that already owns a table of the same name gets a loud
    error rather than a silently skipped baseline.
+
+   **If your host builds its schema with `SQLModel.metadata.create_all`, pass `tables=`.**
+   That metadata object is process-global, so importing any Asas package registers *its*
+   tables into it and a bare `create_all(bind)` creates them. The package's own `migrate()`
+   then fails — and fails into exactly the brownfield shape (tables present, no version
+   table), so the error blames adoption for what was really a host-side sweep. A host with
+   its own Alembic chain is unaffected **only if its `env.py` targets host-only metadata,
+   or filters these tables out** — an `env.py` that hands autogenerate the process-global
+   `SQLModel.metadata` picks up the imported Asas tables the same way, and will start
+   emitting migrations for tables it does not own.
 3. **Seeding** is idempotent and host-called at boot, but it is **not** uniformly named `seed`.
    `asas-lookups` seeds only vocabulary that is standards-based or near-universal — salutation,
    gender, marital status, currency, country, nationality. **Your own product's words are yours

@@ -46,6 +46,7 @@ def _recipient_filter(
     session: Session,
     recipients: Iterable[int],
     entity_type: str,
+    entity_id: Optional[int],
     record: object,
 ) -> set[int]:
     """Drop recipients who may not see the subject record.
@@ -55,14 +56,22 @@ def _recipient_filter(
     clearance reaches it. Note there is no admin floor here, which is MAC's
     defining property.
 
-    The filter runs only when the caller passes ``record=`` to ``notify``, and
-    the package then *requires* ``entity_type`` too. Omitting ``record`` is the
-    silent way to leak a classified ticket's title into an inbox, because the
-    filter simply never runs.
+    The filter runs for **every** ``notify`` that names an ``entity_type``, and
+    receives ``entity_id`` alongside ``record``. ``record`` is ``None`` when the
+    producer had only the type and the id — a generic producer cannot load an
+    arbitrary subject — so resolve it here rather than assuming it was passed.
+    Filtering only when the row happened to arrive is how a classified ticket's
+    title reaches an inbox with no error.
     """
     recipients = set(recipients)
-    if not isinstance(record, Ticket) or record.classification_code is None:
+    ticket = record if isinstance(record, Ticket) else (
+        session.get(Ticket, entity_id)
+        if entity_type == "ticket" and entity_id is not None
+        else None
+    )
+    if ticket is None or ticket.classification_code is None:
         return recipients
+    record = ticket
 
     allowed = set()
     for agent_id in recipients:

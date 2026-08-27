@@ -4,6 +4,7 @@ map :func:`forbidden_edits` results to a 403. Enforcement on/off (``auth_enforce
 the caller's concern, keeping this module free of app config."""
 
 from typing import Any, Optional
+from collections.abc import MutableMapping
 
 from sqlmodel import Session, select
 
@@ -107,12 +108,40 @@ def redact_view(
     the ``view`` policy resolved against ``record``. Keeps the read model's shape stable
     (sets to ``None`` rather than dropping keys). ``also_null`` maps a restricted source
     field to companion fields to null with it (e.g. a ``*_code`` field's resolved
-    ``*_label``). Returns ``read_model`` for chaining."""
+    ``*_label``). Returns ``read_model`` for chaining.
+
+    ``read_model`` may be an **object** (attributes) or a **mapping** (keys). Both
+    are redacted; a field the projection simply does not carry is skipped, which
+    is the normal case for a read model that never included a restricted field.
+
+    Supporting mappings is not a convenience. Until it was added, a plain
+    ``dict`` matched nothing, was returned unchanged, and the restricted field
+    reached the caller with no error — the failure mode of a redaction function
+    is silent disclosure, so anything it cannot redact must be loud instead.
+    Hence the ``TypeError`` below for a shape that is neither.
+    """
     also_null = also_null or {}
-    for field in view_restricted_fields(session, entity_type):
+    restricted = view_restricted_fields(session, entity_type)
+    if not restricted:
+        return read_model
+
+    is_mapping = isinstance(read_model, MutableMapping)
+    if not is_mapping and not hasattr(read_model, "__dict__") and not hasattr(
+        read_model, "__slots__"
+    ):
+        raise TypeError(
+            f"redact_view cannot redact a {type(read_model).__name__}: pass an object "
+            f"with attributes or a mutable mapping. Returning it unredacted would "
+            f"disclose {sorted(restricted)}."
+        )
+
+    for field in restricted:
         if can_view_field(session, user, entity_type, field, record):
             continue
         for target in (field, *also_null.get(field, [])):
-            if hasattr(read_model, target):
+            if is_mapping:
+                if target in read_model:
+                    read_model[target] = None
+            elif hasattr(read_model, target):
                 setattr(read_model, target, None)
     return read_model

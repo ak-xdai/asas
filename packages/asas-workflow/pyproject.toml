@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asas-workflow"
-version = "0.11.1"
+version = "0.11.2"
 description = "Asas workflow module: a graph-based process/approval engine — versioned code-registered definitions, per-activation node executions, quorum approvals with request-info and delegation, condition-driven transitions, and a package-owned Alembic chain."
 readme = "README.md"
 requires-python = ">=3.11"

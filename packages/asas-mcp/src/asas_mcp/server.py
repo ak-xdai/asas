@@ -17,6 +17,7 @@ wiring can mirror ``AUTH_ENFORCE`` semantics — the same flag that opens the
 rest of the API opens this surface.
 """
 
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, List, Optional
@@ -210,6 +211,18 @@ def build_mcp_app(
             await manager.handle_request(scope, receive, send)
 
     asgi_app: Any = _Handler()
+    if token_verifier is None:
+        # Open access is a legitimate choice (a socket nobody else can reach,
+        # a gateway doing auth in front) but it is never a safe *default* to
+        # arrive at by omission: what gets mounted is a remote query API over
+        # the host's data with no login. Say so at build time — a host that
+        # meant it loses nothing by seeing the line in its boot log.
+        logging.getLogger(__name__).warning(
+            "asas-mcp: %r mounted with NO authentication (token_verifier=None). "
+            "Anyone who can reach this endpoint can call every registered tool. "
+            "Pass token_verifier= unless something in front of it authenticates.",
+            name,
+        )
     if token_verifier is not None:
         # Compose the SDK's auth stack by hand (outermost last): bearer
         # verification → auth contextvar → the 401 gate whose challenge

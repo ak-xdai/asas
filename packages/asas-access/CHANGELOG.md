@@ -1,9 +1,13 @@
 # Changelog — `asas-access`
 
-Versions follow semver, and the git tag matches this file: `asas-access/v0.14.0`.
+Versions follow semver, and the git tag matches this file: `asas-access/v0.15.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.15.0 — 2026-08-27
+
+- **`redact_view` now redacts mappings, and refuses shapes it cannot redact.** It nulled fields via `hasattr`/`setattr` only, so a plain `dict` read model matched nothing, came back unchanged, and the restricted field reached the caller **with no error** — a redaction function failing open. Dict and other `MutableMapping` projections are now redacted by key; a shape that is neither object nor mapping raises `TypeError` naming the fields it would have disclosed. Hosts passing Pydantic models (the common case) are unaffected. Found by the reference host (Teamy TEAMY-807).
 
 ## 0.14.0 — 2026-08-27
 

@@ -36,6 +36,10 @@ from .models import (
     merge_result,
 )
 
+# The outcome recorded when a negative verdict has no matching transition (the
+# designed fail-safe in _advance_or_fail). Exported, because a host comparing
+# `instance.outcome` would otherwise restate the literal — and a typo there
+# silently treats every rejection as an approval.
 REJECTED_OUTCOME = "rejected"
 
 
@@ -495,9 +499,19 @@ def decide(
 def final_decision_of(
     session: Session, instance: ProcessInstance
 ) -> tuple[Optional[int], Optional[str]]:
-    """(actor_id, comment) of the decision that settled the instance — already
-    flushed when a completion callback runs, so callbacks can attribute the
-    outcome to its decider (WXL-215/216 both need this)."""
+    """(actor_id, comment) of the **latest positive or negative NodeDecision**
+    recorded against this instance — already flushed when a completion callback
+    runs, so callbacks can attribute an outcome to its decider (WXL-215/216 both
+    need this). It does not require the instance to have completed, and it does
+    not check that this decision is what ended it.
+
+    **This does not tell you how the instance ended**, which the name invites
+    you to expect. What settles that is the *completion outcome* — the end
+    node's configured ``config["outcome"]``, or :data:`REJECTED_OUTCOME` when a
+    negative verdict had no matching transition — and it reaches a completion
+    callback as its third argument. It is not ``NodeDecision.verdict``, and a
+    truthiness test over this tuple is wrong in both directions.
+    """
     row = session.exec(
         select(NodeDecision)
         .join(NodeExecution, NodeDecision.execution_id == NodeExecution.id)
