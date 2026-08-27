@@ -4,7 +4,7 @@ Run on startup (after ``migrate``). Safe to call repeatedly: types are matched b
 and values by ``code`` within a type, so nothing is duplicated.
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 from sqlmodel import Session, select
 
@@ -15,6 +15,7 @@ from .models import (
     LookupType,
     LookupValue,
     SortMode,
+    TypeScope,
 )
 
 # Closed (admin-managed) lists. Each value: code, en, ar.
@@ -82,17 +83,190 @@ _CURRENCY = [
 # behavior; it's classification vocabulary.
 # Risk & issue register categories — closed, admin-managed lists. Each value: code, en, ar.
 
-def ensure_type(session: Session, **kwargs) -> LookupType:
-    t = session.exec(
-        select(LookupType).where(LookupType.key == kwargs["key"])
-    ).first()
+def ensure_type(
+    session: Session,
+    *,
+    key: str,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    is_open: bool = False,
+    is_hierarchical: bool = False,
+    code_system: Optional[str] = None,
+    default_sort: SortMode = SortMode.label,
+    scope: Optional[TypeScope | str] = None,
+    **extra: Any,
+) -> LookupType:
+    """Create the lookup type if it does not exist; return it either way.
+
+    ``key`` is the type's stable machine name (``"nationality"``,
+    ``"ticket_priority"``) and is what everything else references — **not**
+    ``code``, which is the field on a *value*. Getting those two the wrong way
+    round is the common first mistake, and it used to surface as a bare
+    ``KeyError: 'key'`` because this function forwarded ``**kwargs`` straight to
+    the model and named nothing.
+
+    ``name`` defaults to ``key`` so a caller seeding its own vocabulary can
+    supply one argument. ``default_sort`` picks label order or explicit
+    ``sort_order``.
+
+    ``scope`` declares who owns the values (issue #35) and is **never
+    inferred**. Omitting it keeps an existing type's stored scope and defaults a
+    new one to ``platform``. ``is_open`` — a list org users may extend — is only
+    legal on an org-scoped type.
+
+    ``**extra`` remains only for model fields with no reason to be promoted; the
+    parameters above are the contract, and are what ``inspect.signature`` shows.
+
+    Idempotent, and **matched on key alone**: an existing type is returned
+    unchanged, so this never rewrites a deployment's edited label.
+    """
+    t = session.exec(select(LookupType).where(LookupType.key == key)).first()
+    # Effective scope (issue #35): the explicit declaration, else the stored
+    # one for an existing type — an idempotent boot re-registration that omits
+    # scope must not judge is_open against the platform default — else the
+    # platform default for a new type.
+    explicit = scope
+    effective_scope = (
+        TypeScope(explicit) if explicit is not None
+        else (t.scope if t else TypeScope.platform)
+    )
+    # An open list means org users add values, which only an org-owned type
+    # can host — a platform type is never open.
+    if is_open and effective_scope is not TypeScope.org:
+        raise ValueError(
+            f"lookup type {key!r}: is_open=True requires "
+            "scope='org' — platform types never accept org-added values"
+        )
     if t:
+        if explicit is not None and t.scope is not effective_scope:
+            # A silently ignored mismatch would let a host believe its
+            # declaration took effect. Changing a type's scope moves ownership
+            # of every value (platform rows become an unserved template, or
+            # vice versa) — that is a deliberate data migration, never an
+            # ensure_type side effect.
+            raise ValueError(
+                f"lookup type {key!r} already exists with scope "
+                f"'{t.scope.value}', not '{effective_scope.value}' — changing a type's "
+                "scope is a data migration, not something ensure_type does"
+            )
         return t
-    t = LookupType(**kwargs)
+    t = LookupType(
+        key=key,
+        name=name if name is not None else key,
+        description=description,
+        is_open=is_open,
+        is_hierarchical=is_hierarchical,
+        code_system=code_system,
+        default_sort=default_sort,
+        scope=effective_scope,
+        **extra,
+    )
     session.add(t)
     session.commit()
     session.refresh(t)
     return t
+
+
+def seed_org_lookups(session: Session, org_id: int) -> int:
+    """Copy every org-scoped type's platform-held starter template into
+    ``org_id``-owned rows (issue #35). The host calls this at org creation;
+    it is presence-idempotent per (type, code), so re-running — or
+    backfilling an existing org — never duplicates and never overwrites the
+    org's own edits. Returns the number of values created.
+
+    Platform template rows are never served to org reads; after this call the
+    org owns its list outright (template drift is accepted by design).
+    Hierarchies survive the copy: parent pointers are remapped to the org's
+    own copies in a second pass."""
+    created = 0
+    types = session.exec(
+        select(LookupType).where(LookupType.scope == TypeScope.org)
+    ).all()
+    for t in types:
+        templates = session.exec(
+            select(LookupValue).where(
+                LookupValue.type_id == t.id, LookupValue.org_id.is_(None)
+            )
+        ).all()
+        tmpl_by_id = {tmpl.id: tmpl for tmpl in templates}
+        own_by_code = {
+            row.code: row
+            for row in session.exec(
+                select(LookupValue).where(
+                    LookupValue.type_id == t.id, LookupValue.org_id == org_id
+                )
+            ).all()
+        }
+        copies: dict[int, LookupValue] = {}  # template id -> org copy
+        type_created = 0
+        for tmpl in templates:
+            if tmpl.code in own_by_code:
+                continue
+            copy = LookupValue(
+                type_id=t.id,
+                code=tmpl.code,
+                org_id=org_id,
+                status=tmpl.status,
+                is_default=tmpl.is_default,
+                sort_order=tmpl.sort_order,
+                valid_from=tmpl.valid_from,
+                valid_to=tmpl.valid_to,
+                meta=dict(tmpl.meta or {}),
+            )
+            session.add(copy)
+            # One flush per row: a multi-row VALUES insert casts to the
+            # native enum type name, which the migration-built Postgres
+            # schema (VARCHAR columns) doesn't have.
+            session.flush()
+            for tr in tmpl.translations:
+                session.add(
+                    LookupTranslation(
+                        value_id=copy.id,
+                        lang=tr.lang,
+                        label=tr.label,
+                        short_label=tr.short_label,
+                    )
+                )
+            for a in tmpl.aliases:
+                session.add(LookupAlias(value_id=copy.id, alias=a.alias, lang=a.lang))
+            copies[tmpl.id] = copy
+            type_created += 1
+        def org_row_for(template_id: Optional[int]) -> Optional[LookupValue]:
+            # A template row id resolved to the org's own row: the copy made
+            # in this call, or the row the org already had for that code
+            # (which idempotency skipped).
+            if template_id is None:
+                return None
+            row = copies.get(template_id)
+            if row is None:
+                ref = tmpl_by_id.get(template_id)
+                if ref is not None:
+                    row = own_by_code.get(ref.code)
+            return row
+
+        # Second pass: parent and supersede pointers land on the org's own
+        # rows — never back into the template.
+        for tmpl in templates:
+            copy = copies.get(tmpl.id)
+            if copy is None:
+                continue
+            parent = org_row_for(tmpl.parent_id)
+            if parent is not None:
+                copy.parent_id = parent.id
+            successor = org_row_for(tmpl.superseded_by_id)
+            if successor is not None:
+                copy.superseded_by_id = successor.id
+            if parent is not None or successor is not None:
+                session.add(copy)
+        if type_created:
+            # The read-API ETag keys on the type version: without a bump, an
+            # org that cached a response before being seeded (e.g. an empty
+            # list) would keep revalidating to 304 against stale content.
+            t.version += 1
+            session.add(t)
+        created += type_created
+    session.commit()
+    return created
 
 
 def ensure_value(
@@ -111,9 +285,14 @@ def ensure_value(
     value healed), False otherwise — callers use this to know whether to bump the
     type ``version`` (which busts read-API ETags).
     """
+    # Platform rows only (issue #24; DR 0001 T7): the seed runs with no org
+    # context and owns only org-less rows — an org-minted row with the same
+    # code must not suppress the platform default forever (audit defect T-5).
     existing = session.exec(
         select(LookupValue).where(
-            LookupValue.type_id == type_id, LookupValue.code == code
+            LookupValue.type_id == type_id,
+            LookupValue.code == code,
+            LookupValue.org_id.is_(None),
         )
     ).first()
     if existing:
@@ -186,7 +365,9 @@ def seed_lookups(session: Session) -> None:
     for code in _SALUTATION_IN_NAME:
         v = session.exec(
             select(LookupValue).where(
-                LookupValue.type_id == salutation.id, LookupValue.code == code
+                LookupValue.type_id == salutation.id,
+                LookupValue.code == code,
+                LookupValue.org_id.is_(None),  # the seed owns platform rows only
             )
         ).first()
         if v is not None and "show_in_name" not in (v.meta or {}):

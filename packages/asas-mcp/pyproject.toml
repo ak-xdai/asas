@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asas-mcp"
-version = "0.11.0"
+version = "0.11.1"
 description = "Asas MCP module: a remote Model Context Protocol server core — stateless streamable HTTP over the low-level SDK server with verbatim tool schemas, honest annotations, prompt templates, and an optional composed bearer-auth stack."
 readme = "README.md"
 requires-python = ">=3.11"

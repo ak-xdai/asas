@@ -6,7 +6,7 @@ private record of their type (e.g. the teams module registers ``team_lead``/``te
 Like the rest of ``app.access``, this stays framework/config-agnostic: enforce on/off is
 the caller's concern, and visibility is read off the record by value (no enum import)."""
 
-from typing import Any
+from typing import Any, Optional
 
 from sqlmodel import Session
 
@@ -39,7 +39,12 @@ def _visibility_of(record: Any) -> Any:
 
 
 def can_view_record(
-    session: Session, user: Any, entity_type: str, record: Any
+    session: Session,
+    user: Any,
+    entity_type: str,
+    record: Any,
+    *,
+    record_org_id: Optional[int] = None,
 ) -> bool:
     """Whether ``user`` may see ``record``. The **mandatory** layer runs first
     (DR 0021): a caller failing the record's clearance/markings never reaches the
@@ -48,7 +53,9 @@ def can_view_record(
     ``record.view_private`` (grant rows — People Ops by default), or any
     registered relationship principal (e.g. the team's lead or members).
     ``None`` user sees only public records."""
-    if not mac_allows(session, user, entity_type, record):
+    if not mac_allows(
+        session, user, entity_type, record, record_org_id=record_org_id
+    ):
         return False
     if _visibility_of(record) != PRIVATE:
         return True

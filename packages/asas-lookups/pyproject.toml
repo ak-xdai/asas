@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asas-lookups"
-version = "0.11.0"
+version = "0.13.1"
 description = "Asas reference-data / lookups module: generic bilingual lookup types, values, translations and aliases with a FastAPI read + admin API."
 readme = "README.md"
 requires-python = ">=3.11"

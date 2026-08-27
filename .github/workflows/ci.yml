@@ -130,4 +130,116 @@ jobs:
 
       - name: Run tests
         working-directory: packages/asas-cli
+        env:
+          # The scaffold smoke test installs the generated project's pinned-tag
+          # dependencies from the real remote — the consumer path that the
+          # local-path jobs above structurally cannot cover. Network use is
+          # opt-in so the suite stays runnable offline.
+          ASAS_NETWORK_TESTS: "1"
+        run: pytest -q
+
+  selfcheck:
+    # The host self-check (TEAMY-801). Installs the packages it inspects by
+    # **local path, never a pinned tag**: a change that renames a version table
+    # or a configure_* global must fail here on the PR that makes it, which is
+    # the whole reason this suite is in this repository rather than shipped
+    # separately.
+    name: selfcheck (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [sqlite, postgres]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: asas
+          POSTGRES_PASSWORD: asas
+          POSTGRES_DB: asas_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U asas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the inspected packages from source
+        run: |
+          pip install pytest psycopg2-binary
+          pip install \
+            -e packages/asas-lookups \
+            -e packages/asas-access \
+            -e packages/asas-workflow \
+            -e packages/asas-notifications \
+            -e packages/asas-jobs \
+            -e packages/asas-search \
+            -e packages/asas-storage
+
+      - name: Run tests
+        working-directory: examples/selfcheck
+        env:
+          TEST_DATABASE_URL: ${{ matrix.engine == 'postgres' && 'postgresql+psycopg2://asas:asas@localhost:5432/asas_test' || '' }}
+        run: pytest -q
+
+  reference-host:
+    # The reference host (TEAMY-801) — the executable definition of "the host
+    # contract holds". Installs by local path, never a pinned tag, so a
+    # contract break fails on the PR that caused it rather than at the next
+    # release. Both engines: the Postgres leg additionally exercises the deep
+    # search tier, which the SQLite leg must degrade away from cleanly.
+    name: reference-host (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [sqlite, postgres]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: asas
+          POSTGRES_PASSWORD: asas
+          POSTGRES_DB: asas_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U asas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Relative paths in requirements.txt resolve against the working
+      # directory, so this must run from the reference host's own directory.
+      - name: Install (local path dependencies)
+        working-directory: examples/reference-host
+        # requirements.txt declares the postgres driver itself, so both matrix
+        # legs install identically and a developer gets the same environment.
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        working-directory: examples/reference-host
+        env:
+          TEST_DATABASE_URL: ${{ matrix.engine == 'postgres' && 'postgresql+psycopg2://asas:asas@localhost:5432/asas_test' || '' }}
         run: pytest -q

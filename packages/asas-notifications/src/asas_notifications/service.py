@@ -72,9 +72,11 @@ def registered_kinds() -> dict[str, KindSpec]:
 
 # (session) -> (user_id, org_id) of the current request, or None outside one.
 _context_resolver: Optional[Callable[[Session], Optional[tuple[int, int]]]] = None
-# (session, user_ids, entity_type, record) -> user_ids allowed to see the record.
+# (session, user_ids, entity_type, entity_id, record) -> user_ids allowed to
+# know the subject exists. `record` is None when the producer did not have the
+# row; the id is always passed so the filter can resolve it itself.
 _recipient_filter: Optional[
-    Callable[[Session, Sequence[int], str, Any], Sequence[int]]
+    Callable[[Session, Sequence[int], str, Optional[int], Any], Sequence[int]]
 ] = None
 
 
@@ -86,8 +88,23 @@ def configure_context_resolver(
 
 
 def configure_recipient_filter(
-    fn: Optional[Callable[[Session, Sequence[int], str, Any], Sequence[int]]]
+    fn: Optional[Callable[[Session, Sequence[int], str, Optional[int], Any], Sequence[int]]]
 ) -> None:
+    """Install the host's visibility filter for notification recipients.
+
+    Called as ``fn(session, user_ids, entity_type, entity_id, record)`` for every
+    ``notify`` that names an ``entity_type``, and must return the subset of
+    ``user_ids`` allowed to know the subject exists.
+
+    ``record`` is the subject row **when the producer had it**, and ``None`` when
+    it did not — a generic producer may hold only the type and the id. The filter
+    is handed both so it can resolve the row itself in that case; returning
+    ``user_ids`` unchanged is the right answer for an entity type that needs no
+    filtering.
+
+    Filtering has to happen here, before the rows are written: a notification is
+    a **copy** of a fact, so there is no redaction pass afterwards.
+    """
     global _recipient_filter
     _recipient_filter = fn
 
@@ -140,6 +157,7 @@ def notify(
     link: Optional[str] = None,
     entity_type: Optional[str] = None,
     entity_id: Optional[int] = None,
+    org_id: Optional[int] = None,
     record: Any = None,
     category: Optional[Category] = None,
     urgency: Optional[Urgency] = None,
@@ -150,9 +168,16 @@ def notify(
     """Insert notification (+ delivery) rows in the caller's transaction.
 
     - Actor exclusion is built in: ``actor_user_id`` never notifies itself.
-    - When ``record`` is passed, recipients are filtered through the configured
-      visibility filter (``access.can_view_record`` via wiring) — a notification
-      must never leak a private record (the search-index rule).
+    - Notifications are tenant-owned: ``org_id`` is stamped from the explicit
+      parameter, else the context resolver; with neither, ``ValueError`` at the
+      emit site — background producers acting *for* a tenant pass the org
+      explicitly (DR 0001 T4/T7).
+    - **Whenever ``entity_type`` is given**, recipients run through the configured
+      visibility filter — a notification must never leak a private record (the
+      search-index rule). ``record`` is passed to the filter when the producer
+      has it and is ``None`` otherwise; the filter always receives ``entity_id``
+      and decides. Filtering only on ``record is not None`` used to let a
+      producer skip it silently just by not having the row to hand.
     - category/urgency/reason default from the registered kind; producers override
       per-emit only when the event is genuinely ambiguous (e.g. an @mention that
       carries an explicit ask). Never inferred from message text.
@@ -173,6 +198,21 @@ def notify(
         raise LookupError(f"unregistered notification kind: {kind}")
     if _suppress_notify.get():
         return []
+    # Notifications are tenant-owned and ``Notification.org_id`` is NOT NULL.
+    # Stamping order (DR 0001 T4, issue #27): explicit parameter → context
+    # resolver → fail loud HERE, at the emit site, with the fix in the message
+    # — never as an engine-specific IntegrityError at flush, which would also
+    # take the producer's whole transaction down with it (audit defect T-2).
+    org = org_id
+    if org is None:
+        ctx = _context_resolver(session) if _context_resolver else None
+        org = ctx[1] if ctx else None
+    if org is None:
+        raise ValueError(
+            "notify() has no org for this emit: pass org_id= explicitly "
+            "(background jobs, CLI, boot sweeps) or configure the context "
+            "resolver — Notification.org_id is NOT NULL"
+        )
     cat = Category(category) if category else spec.category
     urg = Urgency(urgency) if urgency else spec.urgency
     rsn = Reason(reason) if reason else spec.reason
@@ -180,17 +220,37 @@ def notify(
     ids = list(dict.fromkeys(u for u in recipients if u is not None))
     if actor_user_id is not None:
         ids = [u for u in ids if u != actor_user_id]
-    if record is not None and _recipient_filter is not None:
+    if record is not None and not entity_type and _recipient_filter is not None:
         # "must never leak a private record" is only enforceable when the
         # filter can actually run. A record without its entity_type used to
         # skip filtering silently — the wrong default for a rule stated as
         # "never": fail loud at the producer instead.
-        if not entity_type:
-            raise ValueError(
-                "notify(record=...) requires entity_type — the visibility "
-                "filter cannot run without it"
-            )
-        ids = list(_recipient_filter(session, ids, entity_type, record))
+        #
+        # Conditioned on a filter being configured: a host that has none has
+        # declared nothing restricted, so a stray `record` is merely redundant.
+        raise ValueError(
+            "notify(record=...) requires entity_type — the visibility "
+            "filter cannot run without it"
+        )
+    if entity_type and _recipient_filter is not None:
+        # **The filter runs whenever there is a subject**, not only when the
+        # caller happened to pass the row.
+        #
+        # It used to run only on `record is not None`, so naming an entity_type
+        # without its row skipped filtering entirely and silently — every named
+        # recipient was notified, including for a restricted subject, and by
+        # then the title and body are already written.
+        #
+        # Requiring `record` at every call site was the obvious fix and is the
+        # wrong one: a *generic* producer (a workflow-event bridge, say) legitimately
+        # holds only `(entity_type, entity_id)` and cannot load an arbitrary
+        # subject. So the filter receives the id as well and decides for itself —
+        # use `record` when given, load it when not, or ignore both for an
+        # entity type that needs no filtering. Only the host knows which.
+        #
+        # A notification with no subject at all (a system announcement) has
+        # nothing to filter on and is left alone.
+        ids = list(_recipient_filter(session, ids, entity_type, entity_id, record))
     if not ids:
         return []
 
@@ -204,6 +264,12 @@ def notify(
                 select(Notification)
                 .where(
                     Notification.user_id == user_id,
+                    # The org axis is part of the coalesce identity (DR 0001
+                    # T5, defect T-6): where hosts' entity ids are not
+                    # globally unique, an org-2 emit must never fold into —
+                    # and overwrite — an org-1 row for the same (user, kind,
+                    # entity).
+                    Notification.org_id == org,
                     Notification.kind == kind,
                     Notification.entity_type == entity_type,
                     Notification.entity_id == entity_id,
@@ -228,16 +294,11 @@ def notify(
         if not ids:
             return updated
 
-    # org_id comes from the configured context resolver when available; a host
-    # with its own ORM tenancy listener (Teamy) stamps the same value anyway —
-    # producers never pass it.
-    ctx = _context_resolver(session) if _context_resolver else None
-    org_kw = {"org_id": ctx[1]} if ctx else {}
     created: list[Notification] = []
     for user_id in ids:
         n = Notification(
             user_id=user_id,
-            **org_kw,
+            org_id=org,
             kind=kind,
             category=cat,
             urgency=urg,

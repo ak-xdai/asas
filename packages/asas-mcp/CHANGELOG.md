@@ -1,9 +1,13 @@
 # Changelog — `asas-mcp`
 
-Versions follow semver, and the git tag matches this file: `asas-mcp/v0.11.0`.
+Versions follow semver, and the git tag matches this file: `asas-mcp/v0.11.1`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.11.1 — 2026-08-27
+
+- `build_mcp_app` now logs a warning when called without `token_verifier`. Open access stays supported and unchanged — a socket nobody else can reach, or a gateway authenticating in front — but arriving at it by omission mounts a remote query API over the host's data with no login, which should not be silent (Teamy TEAMY-809).
 
 ## 0.11.0 — 2026-08-25
 

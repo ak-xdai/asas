@@ -1,9 +1,31 @@
 # Changelog — `asas-access`
 
-Versions follow semver, and the git tag matches this file: `asas-access/v0.13.0`.
+Versions follow semver, and the git tag matches this file: `asas-access/v0.15.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.15.0 — 2026-08-27
+
+- **`redact_view` now redacts mappings, and refuses shapes it cannot redact.** It nulled fields via `hasattr`/`setattr` only, so a plain `dict` read model matched nothing, came back unchanged, and the restricted field reached the caller **with no error** — a redaction function failing open. Dict and other `MutableMapping` projections are now redacted by key; a shape that is neither object nor mapping raises `TypeError` naming the fields it would have disclosed. Hosts passing Pydantic models (the common case) are unaffected. Found by the reference host (Teamy TEAMY-807).
+
+## 0.14.0 — 2026-08-27
+
+- **Breaking: the mandatory layer fails closed on the org axis** (issue #29,
+  audit defect T-3). `mac_allows` no longer substitutes the **caller's** org
+  when a record carries no `org_id` — that substitution looked up another
+  tenant's markings and rank catalog, read marked records as unclassified
+  (access granted), and compared classification ranks across incomparable
+  per-org catalogs. The record's org now comes from the record itself or the
+  new keyword-only `record_org_id=` parameter (threaded through
+  `can_view_record` too); a stamped record whose org cannot be resolved
+  denies. Hosts whose child rows carry no `org_id` pass `record_org_id=`
+  explicitly (DR 0001 rule T6 / decision D4).
+- **Clearance-cache invalidation waits for the commit** (defect T-9).
+  `ensure_clearance_levels` invalidated the process-global level cache at
+  mutation time; a reader between the mutation and a rollback cached rows that
+  officially never existed and served them to every session. Invalidation now
+  runs in an `after_commit` hook (DR 0001 rule T8).
 
 ## 0.13.0 — 2026-08-25
 

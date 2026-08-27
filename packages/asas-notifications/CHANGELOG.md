@@ -1,9 +1,44 @@
 # Changelog — `asas-notifications`
 
-Versions follow semver, and the git tag matches this file: `asas-notifications/v0.12.0`.
+Versions follow semver, and the git tag matches this file: `asas-notifications/v0.14.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.14.0 — 2026-08-27
+
+- **BREAKING: the recipient filter's signature gained `entity_id`.** It is now
+  called as `fn(session, user_ids, entity_type, entity_id, record)`. **Action
+  for hosts:** add the parameter to your filter.
+- **The filter now runs for every `notify` that names an `entity_type`**, not
+  only those that also passed `record=`. Filtering on `record is not None` let a
+  producer skip the visibility check silently just by not having the row to
+  hand — every named recipient was notified, including for a restricted subject,
+  and a notification is a *copy*, so there is no redaction pass afterwards.
+  `record` is still passed through when the producer has it and is `None`
+  otherwise; the id is always passed so the filter can resolve the row itself.
+  **Action for hosts:** make sure your filter tolerates `record=None` — an
+  entity type that needs no filtering should return `user_ids` unchanged.
+- Requiring `record=` at every call site was considered and rejected: a generic
+  producer (a workflow-event bridge) legitimately holds only the type and the
+  id and cannot load an arbitrary subject. Only the host knows which entity
+  types need gating, so the decision belongs in the filter (Teamy TEAMY-807).
+
+## 0.13.0 — 2026-08-27
+
+- **Breaking: an emit with no org fails loud at the emit site** (issue #27,
+  audit defect T-2). `Notification.org_id` is NOT NULL, but a `notify()` from a
+  background job, CLI, or boot sweep — where the context resolver answers
+  `None` — used to insert NULL and die as an engine-specific `IntegrityError`
+  at flush, taking the producer's whole transaction with it. Stamping order is
+  now: the new explicit `org_id=` parameter → the context resolver → a clear
+  `ValueError` raised before any row is staged. Background producers acting
+  *for* a tenant pass `org_id=` explicitly; hosts that relied solely on an ORM
+  tenancy listener must pass it or configure the resolver.
+- **Coalescing never crosses orgs** (defect T-6): the `coalesce_unread` merge
+  identity now includes `org_id` — where hosts' entity ids are not globally
+  unique, an org-2 emit can no longer fold into (and overwrite) an org-1 row
+  for the same (recipient, kind, entity).
 
 ## 0.12.0 — 2026-08-25
 

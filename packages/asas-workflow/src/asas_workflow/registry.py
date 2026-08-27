@@ -66,6 +66,24 @@ def register_system_handler(handler_key: str, fn: SystemHandler) -> None:
 
 
 def register_completion_callback(process_key: str, fn: CompletionCallback) -> None:
+    """Register the owner's apply-logic for a completed instance.
+
+    Called as ``fn(session, instance, outcome)`` when an instance **completes**,
+    keyed on the definition's **purpose** (falling back to its key).
+
+    Completion is not only "reached an end node": a negative verdict with no
+    matching transition is the designed fail-safe and completes the instance
+    with :data:`~asas_workflow.REJECTED_OUTCOME`. A callback that assumes it
+    only ever sees an end node's configured outcome will mishandle every
+    rejection.
+
+    **The callback runs inside the engine's own transaction, and must not
+    commit.** That is deliberate: a callback failure then rolls the completion
+    back rather than leaving an instance marked complete with none of its
+    effects applied. Committing inside the callback silently discards that
+    guarantee, and the resulting half-applied state is not recoverable by
+    re-running anything.
+    """
     _COMPLETION_CALLBACKS[process_key] = fn
 
 

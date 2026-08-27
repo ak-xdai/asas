@@ -5,7 +5,7 @@ import pytest
 from sqlmodel import Session
 
 from asas_lookups import ensure_type, service
-from asas_lookups.models import LookupTranslation, LookupValue, SortMode
+from asas_lookups.models import LookupTranslation, LookupValue, SortMode, TypeScope
 
 # The library seeds no open type of its own (TEAMY-803 moved the host-owned
 # vocabularies out), and these tests need one to exercise get_or_create. Making
@@ -22,6 +22,7 @@ def open_type(seeded):
             key=OPEN_TYPE,
             name="Test open type",
             is_open=True,
+            scope=TypeScope.org,
             code_system="internal",
             default_sort=SortMode.label,
         )
@@ -40,7 +41,7 @@ def test_unconfigured_resolver_is_single_tenant(client, seeded, open_type):
         code = service.get_or_create_value(s, open_type, "Plain Hosting")
         s.commit()
         type_ = service.get_type(s, open_type)
-        row = service._value_by_code(s, type_.id, code)
+        row = service._value_by_code(s, type_, code)
         assert row is not None and row.org_id is None
     assert "Plain Hosting" in _labels(client, open_type)
 

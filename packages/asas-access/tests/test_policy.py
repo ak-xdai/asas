@@ -101,6 +101,64 @@ def test_redact_view_nulls_restricted_and_companions(session):
     assert intact.salary_code == "X1"
 
 
+def test_redact_view_redacts_a_mapping(session):
+    """A dict projection must be redacted, not silently passed through.
+
+    Before mappings were supported, `hasattr` matched nothing on a dict, the
+    model came back unchanged, and the restricted field reached the caller with
+    no error — a redaction function failing open, which is the worst direction
+    for one to fail in.
+    """
+    _grant(session, "member", "salary_code", "view", "people_ops")
+    record = SimpleNamespace(id=1)
+    read_model = {"salary_code": "X1", "salary_label": "Grade X1", "name": "A"}
+
+    access.redact_view(
+        session, make_user("member"), "member", read_model, record,
+        also_null={"salary_code": ["salary_label"]},
+    )
+
+    assert read_model["salary_code"] is None
+    assert read_model["salary_label"] is None
+    assert read_model["name"] == "A"
+
+
+def test_redact_view_leaves_a_permitted_mapping_intact(session):
+    _grant(session, "member", "salary_code", "view", "people_ops")
+    record = SimpleNamespace(id=1)
+    read_model = {"salary_code": "X1", "name": "A"}
+
+    access.redact_view(session, make_user("admin"), "member", read_model, record)
+
+    assert read_model["salary_code"] == "X1"
+
+
+def test_redact_view_refuses_a_shape_it_cannot_redact(session):
+    """Loud beats silent when there is something to protect.
+
+    A list has neither attributes nor keys, so redaction cannot be applied.
+    Returning it unchanged would disclose the restricted field.
+    """
+    import pytest
+
+    _grant(session, "member", "salary_code", "view", "people_ops")
+    record = SimpleNamespace(id=1)
+
+    with pytest.raises(TypeError) as exc:
+        access.redact_view(session, make_user("member"), "member", ["X1"], record)
+
+    assert "salary_code" in str(exc.value)
+
+
+def test_redact_view_is_a_noop_when_nothing_is_restricted(session):
+    """No view rows for the entity means no work — and no type demands either.
+
+    This is the common case (most entities restrict nothing), so it must not
+    start raising on shapes it never had to touch.
+    """
+    assert access.redact_view(session, make_user("member"), "member", ["x"], None) == ["x"]
+
+
 def test_seed_is_idempotent_and_validates_fields(session):
     import pytest
 

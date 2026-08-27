@@ -26,10 +26,12 @@ from .definitions import (  # noqa: F401
     set_binding,
     validate_definition,
 )
-from .engine import (  # noqa: F401
+from .engine import (
+    REJECTED_OUTCOME,  # noqa: F401
     EngineError,
     answer_info,
     cancel,
+    configure_org_resolver,
     decide,
     final_decision_of,
     open_instance,
@@ -72,11 +74,11 @@ from .registry import (  # noqa: F401
     subject_renderer,
 )
 
-__version__ = "0.11.0"
+__version__ = "0.11.2"
 
 __all__ = [
-    "__version__",
     "ADMIN_FLOOR",
+    "REJECTED_OUTCOME",
     "AssigneeStatus",
     "DefinitionSpec",
     "DefinitionStatus",
@@ -97,11 +99,13 @@ __all__ = [
     "ProcessTransition",
     "TransitionSpec",
     "Verdict",
+    "__version__",
     "active_definitions_for_purpose",
     "answer_info",
     "bindable_purposes",
     "cancel",
     "clear_registered_specs",
+    "configure_org_resolver",
     "decide",
     "emit",
     "ensure_definition",
@@ -129,4 +133,5 @@ __all__ = [
     "subject_renderer",
     "subscribe",
     "validate_definition",
+    "__version__",
 ]
