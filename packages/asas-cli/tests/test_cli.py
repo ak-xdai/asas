@@ -78,8 +78,49 @@ def test_new_command_rejects_unknown_package(tmp_path, capsys):
     rc = main(["new", "demo", "--with", "lookups,nope", "--dir", str(tmp_path)])
 
     assert rc == 1
-    assert "unknown package" in capsys.readouterr().err
+    assert "unknown Asas package" in capsys.readouterr().err
     assert not (tmp_path / "demo").exists()
+
+
+def test_new_command_accepts_dist_names_like_add_does(tmp_path):
+    # `asas add asas-lookups` works, so `asas new --with asas-lookups` must too
+    # — both go through registry.resolve() now.
+    rc = main(["new", "demo", "--with", "asas-lookups", "--dir", str(tmp_path)])
+
+    assert rc == 0
+    assert "import asas_lookups" in (tmp_path / "demo" / "main.py").read_text()
+
+
+def test_new_command_rejects_a_path_as_project_name(tmp_path, capsys):
+    # The name lands in the generated `[project] name`; a path would scaffold
+    # a project pip refuses to install.
+    rc = main(["new", str(tmp_path / "demo"), "--with", "lookups", "--dir", str(tmp_path)])
+
+    assert rc == 1
+    assert "not a valid project name" in capsys.readouterr().err
+
+
+def test_new_command_refuses_existing_file_at_target(tmp_path, capsys):
+    (tmp_path / "demo").write_text("a file, not a directory")
+
+    rc = main(["new", "demo", "--with", "lookups", "--dir", str(tmp_path)])
+
+    assert rc == 1
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_add_bad_path_fails_before_any_tag_resolution(tmp_path, capsys, monkeypatch):
+    import asas_cli.cli as cli_mod
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("latest_tag ran before the local path check")
+
+    monkeypatch.setattr(cli_mod, "latest_tag", _fail)
+
+    rc = main(["add", "ratelimit", "--path", str(tmp_path / "nope.toml")])
+
+    assert rc == 1
+    assert "does not exist" in capsys.readouterr().err
 
 
 def test_new_command_refuses_existing_nonempty_dir(tmp_path, capsys):

@@ -18,22 +18,24 @@ from .registry import REPO_URL
 # refs/tags/<dist_name>/vX.Y.Z
 _TAG_RE = re.compile(r"refs/tags/([a-z0-9-]+)/(v\d+\.\d+\.\d+)$")
 
-# Bumped whenever a package cuts a release (see RELEASING.md). Used only as a
-# last resort — offline, no git on PATH, or the remote is unreachable — so
+# Bumped whenever a package cuts a release — a step in RELEASING.md's
+# checklist, and tests/test_version_consistency.py at the repo root fails if
+# an entry disagrees with that package's pyproject.toml. Used only as a last
+# resort — offline, no git on PATH, or the remote is unreachable — so
 # `asas add`/`asas new` still work without a network, just possibly pinned to
 # a tag that's no longer that package's newest. An explicit --version always
 # wins over both this and live discovery.
 FALLBACK_TAGS: dict[str, str] = {
-    "asas-access": "v0.13.0",
+    "asas-access": "v0.15.0",
     "asas-jobs": "v0.11.0",
-    "asas-lookups": "v0.11.0",
-    "asas-mcp": "v0.11.0",
-    "asas-notifications": "v0.12.0",
+    "asas-lookups": "v0.13.1",
+    "asas-mcp": "v0.11.1",
+    "asas-notifications": "v0.14.0",
     "asas-ratelimit": "v0.11.0",
-    "asas-search": "v0.11.0",
+    "asas-search": "v0.11.1",
     "asas-storage": "v0.15.0",
     "asas-validation": "v0.11.0",
-    "asas-workflow": "v0.11.0",
+    "asas-workflow": "v0.11.2",
 }
 
 
@@ -78,6 +80,8 @@ def latest_tags(
     stderr warning) for any name live discovery didn't resolve; raises
     KeyError only if a name has neither a live tag nor a known fallback."""
     wanted = set(dist_names)
+    if not wanted:  # nothing to resolve — don't pay the remote round trip
+        return {}
     resolved: dict[str, str] = {}
 
     refs = _ls_remote_tag_refs(repo_url, timeout)

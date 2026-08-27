@@ -32,9 +32,37 @@ def test_scaffold_creates_expected_files(tmp_path):
     )
 
     names = {p.name for p in created}
-    assert names == {"main.py", "settings.py", "pyproject.toml", "README.md", ".env.example"}
+    assert names == {
+        "main.py", "settings.py", "pyproject.toml", "README.md", ".env.example", "test_smoke.py",
+    }
     for path in created:
         assert path.exists()
+    assert (project_dir / "tests" / "test_smoke.py").exists()
+
+
+def test_pyproject_declares_the_dev_extra_the_readme_installs(tmp_path):
+    # Regression: every next-step in the generated README and the CLI's own
+    # hint says `pip install -e '.[dev]'` — the extra has to actually exist,
+    # with pytest (to run tests/) and httpx (fastapi.testclient needs it).
+    project_dir = tmp_path / "demo"
+    scaffold(project_dir, "demo", ["ratelimit"], versions=_versions_for("ratelimit"))
+    doc = tomlkit.parse((project_dir / "pyproject.toml").read_text())
+    dev = "\n".join(doc["project"]["optional-dependencies"]["dev"])
+    assert "pytest" in dev
+    assert "httpx" in dev
+    compile((project_dir / "tests" / "test_smoke.py").read_text(), "test_smoke.py", "exec")
+
+
+def test_refuses_to_scaffold_over_an_existing_file(tmp_path):
+    # Regression: a plain file at the target used to escape as
+    # NotADirectoryError from iterdir(), which the CLI doesn't catch.
+    target = tmp_path / "demo"
+    target.write_text("I am a file, not a directory")
+
+    with pytest.raises(FileExistsError):
+        scaffold(target, "demo", ["lookups"], versions=_versions_for("lookups"))
+
+    assert target.read_text() == "I am a file, not a directory"
 
 
 def test_refuses_to_scaffold_into_nonempty_dir(tmp_path):
