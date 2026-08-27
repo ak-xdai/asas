@@ -36,9 +36,14 @@ engine: Engine = create_engine(settings.database_url, connect_args=_connect_args
 
 def host_tables() -> list:
     """This host's own tables, named explicitly. See ``create_host_schema``."""
-    from .models import Agent, Ticket, TicketAttachment
+    from .models import Agent, SlaNotice, Ticket, TicketAttachment
 
-    return [Agent.__table__, Ticket.__table__, TicketAttachment.__table__]
+    return [
+        Agent.__table__,
+        Ticket.__table__,
+        TicketAttachment.__table__,
+        SlaNotice.__table__,
+    ]
 
 
 def create_host_schema(bind: Engine) -> None:

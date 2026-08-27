@@ -77,8 +77,11 @@ the things most likely to cost you an afternoon.
 - **A completion callback runs inside the engine's transaction.** Committing in
   one discards the rollback-on-failure guarantee it exists to provide.
   (`app/wiring/workflow.py`)
-- **Idempotence must be designed.** Delivery is at-least-once, and a handler
-  that "only reads and notifies" is not idempotent. (`app/wiring/jobs.py`)
+- **Idempotence must be designed, and a read-then-write is not a design.**
+  Delivery is at-least-once, so two sweeps overlap whenever a lease is
+  reclaimed; both can read "not yet done" before either writes. The claim has to
+  be a **uniqueness constraint** the database arbitrates, not a query.
+  (`app/wiring/jobs.py`, `SlaNotice` in `app/models.py`)
 - **`notify(record=...)` is what runs the recipient filter.** Omit it and a
   classified record's title reaches an inbox with no error.
   (`app/wiring/notifications.py`)

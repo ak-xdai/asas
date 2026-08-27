@@ -84,3 +84,20 @@ class TicketAttachment(SQLModel, table=True):
     filename: str
     storage_key: str
     created_at: datetime = Field(default_factory=_now)
+
+
+class SlaNotice(SQLModel, table=True):
+    """One row per ticket that has had its SLA breach announced.
+
+    Exists for its **unique constraint**, not its data. The SLA sweep is an
+    at-least-once job, so two runs can overlap when a lease is reclaimed; a
+    read-then-write check ("has this already been notified?") is a race, because
+    both runs can read *no* and then both write. Inserting this row first makes
+    the database the arbiter: the loser gets an IntegrityError and skips.
+
+    That is the shape worth copying. Idempotence is designed, and the cheapest
+    correct design is usually a uniqueness constraint rather than a query.
+    """
+
+    ticket_id: int = Field(primary_key=True, foreign_key="ticket.id")
+    notified_at: datetime = Field(default_factory=_now)

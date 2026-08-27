@@ -454,3 +454,46 @@ def test_mcp_endpoint_verifies_its_token(monkeypatch):
         monkeypatch.undo()
         importlib.reload(app.config)
         importlib.reload(mcp_wiring)
+
+
+def test_overlapping_sweeps_announce_a_breach_once(app_module, agents):
+    """The race the sequential idempotence test above cannot reach.
+
+    Two sweeps running *concurrently* — what an at-least-once queue produces
+    whenever a lease is reclaimed mid-run — both read "not yet notified" before
+    either writes. The old read-then-write check passed the sequential test and
+    would have produced two notifications here.
+
+    Simulated by interleaving two sessions by hand: both claim, only one may win.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from app.models import SlaNotice
+
+    with Session(app_module.engine) as session:
+        ticket = _ticket(
+            session,
+            assignee_id=agents["agent"].id,
+            due_on=date.today() - timedelta(days=1),
+        )
+        ticket_id = ticket.id
+
+    # Two independent sessions, both claiming the same ticket before either
+    # commits — the shape a reclaimed lease produces.
+    with Session(app_module.engine) as a, Session(app_module.engine) as b:
+        a.add(SlaNotice(ticket_id=ticket_id))
+        a.commit()
+
+        b.add(SlaNotice(ticket_id=ticket_id))
+        with pytest.raises(IntegrityError):
+            b.commit()
+        b.rollback()
+
+    with Session(app_module.engine) as session:
+        claims = session.exec(
+            select(SlaNotice).where(SlaNotice.ticket_id == ticket_id)
+        ).all()
+
+    assert len(claims) == 1, (
+        f"{len(claims)} claims survived — the uniqueness constraint is not "
+        f"arbitrating, so two sweeps could both announce this breach"
+    )

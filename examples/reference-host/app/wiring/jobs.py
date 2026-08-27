@@ -25,9 +25,10 @@ from datetime import date
 
 import asas_jobs as jobs
 import asas_notifications as notifications
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from ..models import DEFAULT_ORG_ID, Ticket
+from ..models import DEFAULT_ORG_ID, SlaNotice, Ticket
 from .notifications import KIND_SLA_BREACHED
 
 KIND_SLA_SWEEP = "tickets.sla_sweep"
@@ -48,18 +49,25 @@ def _context_binder(org_id, **_kwargs) -> None:
     return None
 
 
-def _already_notified(session: Session, ticket_id: int) -> bool:
-    """Has this ticket already produced an SLA notification?"""
-    return (
-        session.exec(
-            select(notifications.Notification).where(
-                notifications.Notification.kind == KIND_SLA_BREACHED,
-                notifications.Notification.entity_type == "ticket",
-                notifications.Notification.entity_id == ticket_id,
-            )
-        ).first()
-        is not None
-    )
+def _claim_sla_notice(session: Session, ticket_id: int) -> bool:
+    """Claim the right to announce this ticket's breach. True if we won it.
+
+    The claim is an INSERT against a primary key, inside a SAVEPOINT. Two
+    overlapping sweeps both attempt it; the database lets exactly one through
+    and the other gets an IntegrityError, which is caught here and reported as
+    "already claimed".
+
+    The savepoint matters: without it, the failed INSERT poisons the outer
+    transaction and the whole sweep dies rather than skipping one ticket.
+    """
+    savepoint = session.begin_nested()
+    try:
+        session.add(SlaNotice(ticket_id=ticket_id))
+        savepoint.commit()
+        return True
+    except IntegrityError:
+        savepoint.rollback()
+        return False
 
 
 def _sla_sweep(session: Session, payload: dict | None = None, **_kwargs) -> None:
@@ -71,19 +79,15 @@ def _sla_sweep(session: Session, payload: dict | None = None, **_kwargs) -> None
     lease that lapses mid-run means the next attempt notifies everyone a second
     time. Nothing about the select prevents that.
 
-    So the handler asks whether a notification already exists before writing
-    one. That check is the idempotence, and it is why it is a query against the
-    notifications table rather than a flag on the job.
+    A read-then-write check — "has this already been notified?" — is **not**
+    enough, and that is the trap worth seeing. Two sweeps overlap whenever a
+    lease is reclaimed while the original run is still working, and both can
+    read *no* before either writes.
 
-    **It is a read-then-write, and therefore not atomic.** Two sweeps running
-    concurrently — an expired lease reclaimed while the original is still
-    working — can both see no row and both insert. A production host closes that
-    with a uniqueness constraint on the delivery key and an insert-on-conflict,
-    so the database refuses the second write; this host keeps the query because
-    the point here is *that* idempotence must be designed, and a schema
-    constraint would put the mechanism in a migration rather than in front of
-    the reader. Do not copy the read-then-write into a system where the race
-    matters.
+    So the claim is a **uniqueness constraint**, not a query: each ticket's
+    breach inserts one `SlaNotice` row, and the database lets exactly one
+    concurrent sweep win. Idempotence is designed, and the cheapest correct
+    design is usually a constraint rather than a check.
 
     (``notify(coalesce_unread=True)`` is the package's own answer to the same
     problem, but it only engages when the kind has no delivery channels — this
@@ -101,8 +105,8 @@ def _sla_sweep(session: Session, payload: dict | None = None, **_kwargs) -> None
     for ticket in overdue:
         if ticket.assignee_id is None:
             continue
-        if _already_notified(session, ticket.id):
-            continue
+        if not _claim_sla_notice(session, ticket.id):
+            continue  # another sweep already announced this one
         notifications.notify(
             session,
             [ticket.assignee_id],
