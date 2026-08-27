@@ -126,8 +126,9 @@ def seed_org_lookups(session: Session, org_id: int) -> int:
                 LookupValue.type_id == t.id, LookupValue.org_id.is_(None)
             )
         ).all()
-        own_codes = {
-            row.code
+        tmpl_by_id = {tmpl.id: tmpl for tmpl in templates}
+        own_by_code = {
+            row.code: row
             for row in session.exec(
                 select(LookupValue).where(
                     LookupValue.type_id == t.id, LookupValue.org_id == org_id
@@ -135,8 +136,9 @@ def seed_org_lookups(session: Session, org_id: int) -> int:
             ).all()
         }
         copies: dict[int, LookupValue] = {}  # template id -> org copy
+        type_created = 0
         for tmpl in templates:
-            if tmpl.code in own_codes:
+            if tmpl.code in own_by_code:
                 continue
             copy = LookupValue(
                 type_id=t.id,
@@ -166,16 +168,29 @@ def seed_org_lookups(session: Session, org_id: int) -> int:
             for a in tmpl.aliases:
                 session.add(LookupAlias(value_id=copy.id, alias=a.alias, lang=a.lang))
             copies[tmpl.id] = copy
-            created += 1
-        # Second pass: parent pointers point at the org's own copies, never
-        # back into the template.
+            type_created += 1
+        # Second pass: parent pointers land on the org's own rows — a fresh
+        # copy, or a row the org already had (which idempotency skipped) —
+        # never back into the template.
         for tmpl in templates:
             copy = copies.get(tmpl.id)
-            if copy is not None and tmpl.parent_id is not None:
-                parent_copy = copies.get(tmpl.parent_id)
-                if parent_copy is not None:
-                    copy.parent_id = parent_copy.id
-                    session.add(copy)
+            if copy is None or tmpl.parent_id is None:
+                continue
+            parent = copies.get(tmpl.parent_id)
+            if parent is None:
+                parent_tmpl = tmpl_by_id.get(tmpl.parent_id)
+                if parent_tmpl is not None:
+                    parent = own_by_code.get(parent_tmpl.code)
+            if parent is not None:
+                copy.parent_id = parent.id
+                session.add(copy)
+        if type_created:
+            # The read-API ETag keys on the type version: without a bump, an
+            # org that cached a response before being seeded (e.g. an empty
+            # list) would keep revalidating to 304 against stale content.
+            t.version += 1
+            session.add(t)
+        created += type_created
     session.commit()
     return created
 

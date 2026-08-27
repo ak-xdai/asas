@@ -5,6 +5,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from .models import TypeScope
 
 # ---------- Read ----------
 
@@ -16,7 +17,7 @@ class LookupTypeRead(BaseModel):
     is_open: bool
     is_hierarchical: bool
     code_system: Optional[str] = None
-    scope: str
+    scope: TypeScope
     default_sort: str
     version: int
 
@@ -73,7 +74,7 @@ class LookupTypeCreate(BaseModel):
     code_system: Optional[str] = None
     # Who owns the values (issue #35): "platform" (org-read-only reference
     # data, the default) or "org" (org-owned vocabulary, seeded per org).
-    scope: str = "platform"
+    scope: TypeScope = TypeScope.platform
     default_sort: str = "label"
 
 

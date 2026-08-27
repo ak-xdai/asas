@@ -8,9 +8,13 @@ Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASI
 ## 0.13.0 — 2026-08-27
 
 - **Breaking: every lookup type declares an explicit scope** (issue #35) —
-  `platform` (org-read-only reference data, the default and the backfill for
-  every existing type via migration `0002`) or `org` (org-owned vocabulary).
-  Nothing is inferred from `code_system` or `is_open`.
+  `platform` (org-read-only reference data, the default) or `org` (org-owned
+  vocabulary). Nothing is inferred from `code_system` or `is_open` at runtime;
+  migration `0002` backfills existing types to `platform`, except legacy
+  `is_open` types which backfill to `org` (an open list means org users add
+  values, which only an org-owned type can host). The migration is resumable:
+  a `scope` column that already exists but still holds NULLs is backfilled
+  and tightened rather than skipped.
 - **Platform types are immutable to orgs in full**: org context now gets 403
   on `create_value` too (previously an org could mint its own row on any type
   while the code was free). `is_open=True` is valid only on org types —
@@ -21,9 +25,12 @@ Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASI
   per org by the new exported **`seed_org_lookups(session, org_id)`** — called
   by the host at org creation, presence-idempotent per (type, code) so
   backfilling existing orgs is one call. Hierarchy parent pointers are
-  remapped to the org's own copies. Template drift is accepted by design;
-  platform types keep automatic propagation.
-- `LookupTypeCreate`/`LookupTypeRead` carry `scope`; `TypeScope` is exported.
+  remapped to the org's own rows — fresh copies or values the org already
+  had. A seed that creates rows bumps the type `version` so read-API ETags
+  invalidate. Template drift is accepted by design; platform types keep
+  automatic propagation.
+- `LookupTypeCreate`/`LookupTypeRead` carry `scope` (typed as `TypeScope`,
+  so an unknown scope is a schema-level 422); `TypeScope` is exported.
 
 ## 0.12.1 — 2026-08-27
 
