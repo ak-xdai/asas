@@ -86,24 +86,29 @@ def test_org_merge_involving_platform_values_is_rejected(seeded, org):
     org.org_id = 7
     with Session(seeded) as s:
         type_ = service.get_type(s, "gender")
-        # both sides platform
         _expect_403(service.merge_values, s, type_, "other", "male")
-        # org-owned source into a platform target is still a platform mutation
-        service.create_value(
-            s, type_,
-            code="org-only",
-            translations=[TranslationIn(lang="en", label="Org only")],
-            is_default=False, sort_order=0, parent_code=None, meta={}, aliases=[],
-        )
-        _expect_403(service.merge_values, s, type_, "org-only", "male")
+        # and an org can't mint a source of its own on a platform type either
+        # (issue #35): the whole value set is platform property
+        with pytest.raises(HTTPException) as exc:
+            service.create_value(
+                s, type_,
+                code="org-only",
+                translations=[TranslationIn(lang="en", label="Org only")],
+                is_default=False, sort_order=0, parent_code=None, meta={}, aliases=[],
+            )
+        assert exc.value.status_code == 403
         assert _global_row(s, type_, "male").aliases == []
         assert _global_row(s, type_, "other").status == LookupStatus.active
 
 
 def test_org_keeps_full_control_of_its_own_values(seeded, org):
+    with Session(seeded) as s:  # the host registers an org-scoped vocabulary
+        asas_lookups.ensure_type(
+            s, key="tag", name="Tag", scope=asas_lookups.TypeScope.org
+        )
     org.org_id = 7
     with Session(seeded) as s:
-        type_ = service.get_type(s, "gender")
+        type_ = service.get_type(s, "tag")
         service.create_value(
             s, type_,
             code="unspecified",
@@ -125,7 +130,7 @@ def test_org_keeps_full_control_of_its_own_values(seeded, org):
     # another org can't even see it, let alone edit it
     org.org_id = 9
     with Session(seeded) as s:
-        type_ = service.get_type(s, "gender")
+        type_ = service.get_type(s, "tag")
         with pytest.raises(HTTPException) as exc:
             service.update_value(
                 s, type_, "unspecified",
@@ -158,15 +163,15 @@ def test_seed_restores_platform_row_despite_org_row(seeded, org):
         s.delete(g)  # simulate the platform row lost / pre-seed state
         s.commit()
 
-    org.org_id = 7
-    with Session(seeded) as s:
+    with Session(seeded) as s:  # legacy org row (predates the scope model)
+        from asas_lookups.models import LookupTranslation
+
         type_ = service.get_type(s, "gender")
-        service.create_value(
-            s, type_,
-            code="female",
-            translations=[TranslationIn(lang="en", label="Org female")],
-            is_default=False, sort_order=0, parent_code=None, meta={}, aliases=[],
-        )
+        row = LookupValue(type_id=type_.id, code="female", org_id=7)
+        s.add(row)
+        s.flush()
+        s.add(LookupTranslation(value_id=row.id, lang="en", label="Org female"))
+        s.commit()
 
     org.org_id = None
     with Session(seeded) as s:

@@ -15,6 +15,7 @@ from .models import (
     LookupType,
     LookupValue,
     SortMode,
+    TypeScope,
 )
 
 # Closed (admin-managed) lists. Each value: code, en, ar.
@@ -83,6 +84,15 @@ _CURRENCY = [
 # Risk & issue register categories — closed, admin-managed lists. Each value: code, en, ar.
 
 def ensure_type(session: Session, **kwargs) -> LookupType:
+    # Per-type scope (issue #35) is explicit at registration and constrained:
+    # an open list means org users add values, which only an org-owned type
+    # can host — a platform type is never open.
+    scope = TypeScope(kwargs.get("scope", TypeScope.platform))
+    if kwargs.get("is_open") and scope is not TypeScope.org:
+        raise ValueError(
+            f"lookup type {kwargs.get('key')!r}: is_open=True requires "
+            "scope='org' — platform types never accept org-added values"
+        )
     t = session.exec(
         select(LookupType).where(LookupType.key == kwargs["key"])
     ).first()
@@ -93,6 +103,81 @@ def ensure_type(session: Session, **kwargs) -> LookupType:
     session.commit()
     session.refresh(t)
     return t
+
+
+def seed_org_lookups(session: Session, org_id: int) -> int:
+    """Copy every org-scoped type's platform-held starter template into
+    ``org_id``-owned rows (issue #35). The host calls this at org creation;
+    it is presence-idempotent per (type, code), so re-running — or
+    backfilling an existing org — never duplicates and never overwrites the
+    org's own edits. Returns the number of values created.
+
+    Platform template rows are never served to org reads; after this call the
+    org owns its list outright (template drift is accepted by design).
+    Hierarchies survive the copy: parent pointers are remapped to the org's
+    own copies in a second pass."""
+    created = 0
+    types = session.exec(
+        select(LookupType).where(LookupType.scope == TypeScope.org)
+    ).all()
+    for t in types:
+        templates = session.exec(
+            select(LookupValue).where(
+                LookupValue.type_id == t.id, LookupValue.org_id.is_(None)
+            )
+        ).all()
+        own_codes = {
+            row.code
+            for row in session.exec(
+                select(LookupValue).where(
+                    LookupValue.type_id == t.id, LookupValue.org_id == org_id
+                )
+            ).all()
+        }
+        copies: dict[int, LookupValue] = {}  # template id -> org copy
+        for tmpl in templates:
+            if tmpl.code in own_codes:
+                continue
+            copy = LookupValue(
+                type_id=t.id,
+                code=tmpl.code,
+                org_id=org_id,
+                status=tmpl.status,
+                is_default=tmpl.is_default,
+                sort_order=tmpl.sort_order,
+                valid_from=tmpl.valid_from,
+                valid_to=tmpl.valid_to,
+                meta=dict(tmpl.meta or {}),
+            )
+            session.add(copy)
+            # One flush per row: a multi-row VALUES insert casts to the
+            # native enum type name, which the migration-built Postgres
+            # schema (VARCHAR columns) doesn't have.
+            session.flush()
+            for tr in tmpl.translations:
+                session.add(
+                    LookupTranslation(
+                        value_id=copy.id,
+                        lang=tr.lang,
+                        label=tr.label,
+                        short_label=tr.short_label,
+                    )
+                )
+            for a in tmpl.aliases:
+                session.add(LookupAlias(value_id=copy.id, alias=a.alias, lang=a.lang))
+            copies[tmpl.id] = copy
+            created += 1
+        # Second pass: parent pointers point at the org's own copies, never
+        # back into the template.
+        for tmpl in templates:
+            copy = copies.get(tmpl.id)
+            if copy is not None and tmpl.parent_id is not None:
+                parent_copy = copies.get(tmpl.parent_id)
+                if parent_copy is not None:
+                    copy.parent_id = parent_copy.id
+                    session.add(copy)
+    session.commit()
+    return created
 
 
 def ensure_value(

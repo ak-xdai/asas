@@ -17,19 +17,22 @@ Public surface — the Asas host contract:
 """
 
 from .migrate import migrate
+from .models import TypeScope  # noqa: F401
 from .router import Routers, build_routers
 from .seeding import (  # noqa: F401
     bump_version_if,
     ensure_type,
     ensure_value,
     seed_lookups as seed,
+    seed_org_lookups,
 )
 from .service import configure_org_resolver, find_org_shadows
 
-__version__ = "0.12.1"
+__version__ = "0.13.0"
 
 __all__ = [
     "Routers",
+    "TypeScope",
     "__version__",
     "build_routers",
     "bump_version_if",
@@ -39,4 +42,5 @@ __all__ = [
     "find_org_shadows",
     "migrate",
     "seed",
+    "seed_org_lookups",
 ]

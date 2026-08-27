@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from sqlmodel import Session, select
 
 from . import service
-from .models import LookupType, SortMode
+from .models import LookupType, SortMode, TypeScope
 from .schemas import (
     AliasIn,
     DeprecateRequest,
@@ -41,6 +41,7 @@ def _type_read(t: LookupType) -> LookupTypeRead:
         is_open=t.is_open,
         is_hierarchical=t.is_hierarchical,
         code_system=t.code_system,
+        scope=t.scope.value,
         default_sort=t.default_sort.value,
         version=t.version,
     )
@@ -123,6 +124,19 @@ def build_routers(get_session: Callable) -> Routers:
     def create_type(payload: LookupTypeCreate, session: Session = Depends(get_session)):
         if session.exec(select(LookupType).where(LookupType.key == payload.key)).first():
             raise HTTPException(status_code=409, detail=f"type '{payload.key}' exists")
+        try:
+            scope = TypeScope(payload.scope)
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"unknown scope '{payload.scope}'"
+            )
+        if payload.is_open and scope is not TypeScope.org:
+            # An open list means org users add values — only an org-owned
+            # type can host that; a platform type is never open (issue #35).
+            raise HTTPException(
+                status_code=422,
+                detail="is_open=true requires scope='org'",
+            )
         t = LookupType(
             key=payload.key,
             name=payload.name,
@@ -130,6 +144,7 @@ def build_routers(get_session: Callable) -> Routers:
             is_open=payload.is_open,
             is_hierarchical=payload.is_hierarchical,
             code_system=payload.code_system,
+            scope=scope,
             default_sort=SortMode(payload.default_sort),
         )
         session.add(t)

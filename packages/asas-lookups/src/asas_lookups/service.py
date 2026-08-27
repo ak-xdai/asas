@@ -23,6 +23,7 @@ from .models import (
     LookupType,
     LookupValue,
     SortMode,
+    TypeScope,
 )
 from .schemas import (
     LookupValueRead,
@@ -49,11 +50,23 @@ def _current_org(session: Session) -> Optional[int]:
     return _org_resolver(session) if _org_resolver is not None else None
 
 
-def _org_scoped(stmt, session: Session):
-    """Restrict a LookupValue select to rows the caller may see: platform defaults
-    plus their own org's rows. Tree-aware by design: when sub-orgs arrive, this walks
-    ``parent_org_id`` up before falling back to NULL — today the chain is one org."""
+def _org_scoped(stmt, session: Session, type_: Optional[LookupType] = None):
+    """Restrict a LookupValue select to rows the caller may see.
+
+    For an **org-scoped type** (issue #35): the platform rows are a starter
+    TEMPLATE, never served to org reads — an org sees only its own rows, and
+    the no-context view is template management (platform rows only).
+
+    For a **platform type** (or when the type is not at hand): platform rows,
+    plus the caller's own org rows so legacy shadows keep resolving until
+    hosts clean them up (``find_org_shadows``). Tree-aware by design: when
+    sub-orgs arrive, this walks ``parent_org_id`` before falling back to NULL
+    — today the chain is one org."""
     org = _current_org(session)
+    if type_ is not None and type_.scope == TypeScope.org:
+        if org is None:
+            return stmt.where(LookupValue.org_id.is_(None))
+        return stmt.where(LookupValue.org_id == org)
     if org is None:
         return stmt.where(LookupValue.org_id.is_(None))
     return stmt.where(or_(LookupValue.org_id.is_(None), LookupValue.org_id == org))
@@ -79,12 +92,15 @@ def get_type(session: Session, key: str) -> LookupType:
     return t
 
 
-def _value_by_code(session: Session, type_id: int, code: str) -> Optional[LookupValue]:
+def _value_by_code(
+    session: Session, type_: LookupType, code: str
+) -> Optional[LookupValue]:
     stmt = _org_scoped(
         select(LookupValue).where(
-            LookupValue.type_id == type_id, LookupValue.code == code
+            LookupValue.type_id == type_.id, LookupValue.code == code
         ),
         session,
+        type_,
     ).order_by(LookupValue.org_id.is_(None))  # org override (False) sorts first
     return session.exec(stmt).first()
 
@@ -118,7 +134,7 @@ def value_exists(session: Session, type_key: str, code: str) -> bool:
     """Whether a value with this code exists on the type (org overrides honored).
     False for an unknown type — callers validating references get one seam."""
     t = session.exec(select(LookupType).where(LookupType.key == type_key)).first()
-    return t is not None and _value_by_code(session, t.id, code) is not None
+    return t is not None and _value_by_code(session, t, code) is not None
 
 
 def _translation_for(value: LookupValue, lang: str) -> Optional[LookupTranslation]:
@@ -183,11 +199,12 @@ def list_values(
         )
         .where(LookupValue.type_id == type_.id),
         session,
+        type_,
     )
     if active_only:
         stmt = stmt.where(LookupValue.status == LookupStatus.active)
     if parent_code:
-        parent = _value_by_code(session, type_.id, parent_code)
+        parent = _value_by_code(session, type_, parent_code)
         stmt = stmt.where(LookupValue.parent_id == (parent.id if parent else -1))
     values = _prefer_org(list(session.exec(stmt).all()))
 
@@ -205,7 +222,7 @@ def list_values(
     window = values[start : start + page_size]
 
     code_map = {v.id: v.code for v in session.exec(
-        _org_scoped(select(LookupValue).where(LookupValue.type_id == type_.id), session)
+        _org_scoped(select(LookupValue).where(LookupValue.type_id == type_.id), session, type_)
     ).all()}
     return total, [serialize_value(v, lang, code_map) for v in window]
 
@@ -221,7 +238,7 @@ def _matches(value: LookupValue, needle: str) -> bool:
 def get_value_read(
     session: Session, type_: LookupType, code: str, lang: str, follow_supersede: bool
 ) -> LookupValueRead:
-    value = _value_by_code(session, type_.id, code)
+    value = _value_by_code(session, type_, code)
     if not value:
         raise HTTPException(
             status_code=404, detail=f"Unknown code '{code}' in '{type_.key}'"
@@ -236,6 +253,7 @@ def get_value_read(
                     LookupValue.id == value.superseded_by_id
                 ),
                 session,
+                type_,
             )
         ).first()
         if replacement:
@@ -248,6 +266,7 @@ def get_value_read(
             _org_scoped(
                 select(LookupValue).where(LookupValue.id == value.parent_id),
                 session,
+                type_,
             )
         ).first()
         if parent:
@@ -275,6 +294,7 @@ def label_maps(
                 .options(selectinload(LookupValue.translations))
                 .where(LookupValue.type_id == t.id),
                 session,
+                t,
             ).order_by(LookupValue.org_id.is_(None).desc())  # global first, org overwrites
         ).all()
         out[key] = {v.code: _label_str(v, lang) for v in values}
@@ -289,7 +309,7 @@ def value_meta_map(session: Session, type_key: str) -> dict[str, dict]:
     if not t:
         return {}
     values = session.exec(
-        _org_scoped(select(LookupValue).where(LookupValue.type_id == t.id), session)
+        _org_scoped(select(LookupValue).where(LookupValue.type_id == t.id), session, t)
         .order_by(LookupValue.org_id.is_(None).desc())  # global first, org overwrites
     ).all()
     return {v.code: (v.meta or {}) for v in values}
@@ -302,7 +322,7 @@ def value_meta(session: Session, type_key: str, code: Optional[str]) -> dict:
     t = session.exec(select(LookupType).where(LookupType.key == type_key)).first()
     if not t:
         return {}
-    value = _value_by_code(session, t.id, code)
+    value = _value_by_code(session, t, code)
     return (value.meta or {}) if value else {}
 
 
@@ -315,7 +335,7 @@ def get_or_create_value(
     t = get_type(session, type_key)
     label = label.strip()
     code = slugify(label)
-    existing = _value_by_code(session, t.id, code)
+    existing = _value_by_code(session, t, code)
     if existing:
         return existing.code
     value = create_value(
@@ -338,7 +358,7 @@ def find_value_code(session: Session, type_key: str, code: str) -> Optional[str]
     A read-only companion to :func:`get_or_create_value` for callers that hold a
     stored code and must not create anything (e.g. code-pinned skill upserts)."""
     t = get_type(session, type_key)
-    value = _value_by_code(session, t.id, code)
+    value = _value_by_code(session, t, code)
     return value.code if value else None
 
 
@@ -352,6 +372,7 @@ def resolve_codes(
             .options(selectinload(LookupValue.translations))
             .where(LookupValue.type_id == type_.id, LookupValue.code.in_(wanted)),
             session,
+            type_,
         ).order_by(LookupValue.org_id.is_(None).desc())  # global first, org overwrites
     ).all()
     found = {v.code: _label_str(v, lang) for v in rows}
@@ -410,8 +431,21 @@ def _value_for_write(session: Session, type_: LookupType, code: str) -> LookupVa
     With org context the caller may edit only rows their org owns; a code that
     resolves to a platform row is read-only for organizations (403). Without
     context (platform scope — seeds, boot, platform admin) the global row only.
+
+    Per-type scope (issue #35): on a **platform type** every value is platform
+    property, so org context is rejected outright; on an **org type** the
+    platform rows are the never-served template, so an org may touch only its
+    own rows — a template-only code answers 404 (its existence never leaks).
     """
     org = _current_org(session)
+    if org is not None and type_.scope == TypeScope.platform:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"'{type_.key}' is a platform type — its values are "
+                "read-only for organizations"
+            ),
+        )
     base = select(LookupValue).where(
         LookupValue.type_id == type_.id, LookupValue.code == code
     )
@@ -419,14 +453,6 @@ def _value_for_write(session: Session, type_: LookupType, code: str) -> LookupVa
         own = session.exec(base.where(LookupValue.org_id == org)).first()
         if own:
             return own
-        if session.exec(base.where(LookupValue.org_id.is_(None))).first() is not None:
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"'{code}' is a platform value and is read-only for "
-                    "organizations"
-                ),
-            )
         raise HTTPException(status_code=404, detail=f"Unknown code '{code}'")
     value = session.exec(base.where(LookupValue.org_id.is_(None))).first()
     if not value:
@@ -448,6 +474,17 @@ def create_value(
 ) -> LookupValue:
     if not translations:
         raise HTTPException(status_code=422, detail="At least one translation is required")
+    # Per-type scope (issue #35): a platform type's value set is platform
+    # property in full — org context may not ADD values either (previously an
+    # org could mint its own row on any type as long as the code was free).
+    if type_.scope == TypeScope.platform and _current_org(session) is not None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"'{type_.key}' is a platform type — its values are "
+                "read-only for organizations"
+            ),
+        )
 
     if not code:
         # Derive a stable code from the English (or first) label for open lists.
@@ -457,14 +494,14 @@ def create_value(
         )
         code = slugify(basis)
 
-    if _value_by_code(session, type_.id, code):
+    if _value_by_code(session, type_, code):
         raise HTTPException(
             status_code=409, detail=f"code '{code}' already exists in '{type_.key}'"
         )
 
     parent_id = None
     if parent_code:
-        parent = _value_by_code(session, type_.id, parent_code)
+        parent = _value_by_code(session, type_, parent_code)
         if not parent:
             raise HTTPException(status_code=422, detail=f"Unknown parent '{parent_code}'")
         parent_id = parent.id
@@ -534,7 +571,7 @@ def deprecate_value(
     value.status = LookupStatus.deprecated
     value.valid_to = valid_to or datetime.utcnow().date()
     if superseded_by:
-        target = _value_by_code(session, type_.id, superseded_by)
+        target = _value_by_code(session, type_, superseded_by)
         if not target:
             raise HTTPException(
                 status_code=422, detail=f"Unknown superseded_by '{superseded_by}'"

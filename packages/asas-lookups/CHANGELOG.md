@@ -1,9 +1,29 @@
 # Changelog — `asas-lookups`
 
-Versions follow semver, and the git tag matches this file: `asas-lookups/v0.12.1`.
+Versions follow semver, and the git tag matches this file: `asas-lookups/v0.13.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.13.0 — 2026-08-27
+
+- **Breaking: every lookup type declares an explicit scope** (issue #35) —
+  `platform` (org-read-only reference data, the default and the backfill for
+  every existing type via migration `0002`) or `org` (org-owned vocabulary).
+  Nothing is inferred from `code_system` or `is_open`.
+- **Platform types are immutable to orgs in full**: org context now gets 403
+  on `create_value` too (previously an org could mint its own row on any type
+  while the code was free). `is_open=True` is valid only on org types —
+  enforced in `ensure_type` (ValueError) and the admin API (422).
+- **Org types live wholly at org level.** The platform-held rows are a starter
+  template: never served to org reads (an unseeded org sees an empty list, and
+  a template-only code answers 404), managed from platform scope, and copied
+  per org by the new exported **`seed_org_lookups(session, org_id)`** — called
+  by the host at org creation, presence-idempotent per (type, code) so
+  backfilling existing orgs is one call. Hierarchy parent pointers are
+  remapped to the org's own copies. Template drift is accepted by design;
+  platform types keep automatic propagation.
+- `LookupTypeCreate`/`LookupTypeRead` carry `scope`; `TypeScope` is exported.
 
 ## 0.12.1 — 2026-08-27
 

@@ -26,6 +26,25 @@ class SortMode(str, Enum):
     sort_order = "sort_order"  # curated order via LookupValue.sort_order
 
 
+class TypeScope(str, Enum):
+    """Who owns a type's values (issue #35; DR 0001 D2 as decided in #24).
+
+    Explicit and declared at registration — never inferred from ``code_system``
+    or ``is_open``:
+
+    - ``platform``: values are platform-owned reference data, immutable to
+      orgs — no edits, no additions, no tombstones. Platform updates reach
+      every tenant instantly. Never an open list.
+    - ``org``: values live wholly at org level. The type's platform-held rows
+      are a starter TEMPLATE, copied per org by ``seed_org_lookups`` at org
+      creation and never served to org reads; after seeding the org owns its
+      list outright (template drift is accepted by design).
+    """
+
+    platform = "platform"
+    org = "org"
+
+
 class LookupType(SQLModel, table=True):
     """Registry of lookup types (gender, nationality, university, skill, ...)."""
 
@@ -35,9 +54,13 @@ class LookupType(SQLModel, table=True):
     key: str = Field(index=True, unique=True)  # machine name, e.g. "nationality"
     name: str
     description: Optional[str] = None
-    is_open: bool = False  # can non-admins add values? (skills/universities = True)
+    is_open: bool = False  # can non-admins add values? Only legal on org-scoped types.
     is_hierarchical: bool = False  # values may have a parent (country -> city)
     code_system: Optional[str] = None  # "ISO3166-1A2", "ISO639-1", "internal", ...
+    # Who owns the values (issue #35). Explicit — never inferred. Existing
+    # types backfill to platform in migration 0002 (all library seeds are
+    # reference data); hosts declare scope="org" for their vocabularies.
+    scope: TypeScope = TypeScope.platform
     default_sort: SortMode = SortMode.label
     version: int = 1  # bumped on any change under this type -> cache invalidation
     created_at: datetime = Field(default_factory=datetime.utcnow)
