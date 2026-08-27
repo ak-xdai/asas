@@ -225,3 +225,22 @@ def test_org_resolver_supplies_the_org_when_not_passed(session):
         assert explicit.org_id == 8
     finally:
         engine._org_resolver = None
+
+
+def test_explicit_none_org_stays_platform_scoped(session):
+    """An explicit org_id=None is a deliberate platform-scoped instance — the
+    resolver must not replace it (only an OMITTED org_id consults it)."""
+    workflow.register_floor_resolver(lambda s, org_id=None: {999})
+    workflow.configure_org_resolver(lambda s: 5)
+    key = _key()
+    _seed(session, _simple_spec(key, _principal(3)))
+    instance = workflow.open_instance(
+        session,
+        process_key=key,
+        entity_type="project",
+        entity_id=12,
+        subject_snapshot={"title": "thing"},
+        initiated_by=1,
+        org_id=None,
+    )
+    assert instance.org_id is None

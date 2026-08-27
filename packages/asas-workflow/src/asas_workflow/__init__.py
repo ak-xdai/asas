@@ -76,7 +76,6 @@ from .registry import (  # noqa: F401
 __version__ = "0.11.1"
 
 __all__ = [
-    "__version__",
     "ADMIN_FLOOR",
     "AssigneeStatus",
     "DefinitionSpec",
@@ -98,11 +97,13 @@ __all__ = [
     "ProcessTransition",
     "TransitionSpec",
     "Verdict",
+    "__version__",
     "active_definitions_for_purpose",
     "answer_info",
     "bindable_purposes",
     "cancel",
     "clear_registered_specs",
+    "configure_org_resolver",
     "decide",
     "emit",
     "ensure_definition",
@@ -110,7 +111,6 @@ __all__ = [
     "get_active_definition",
     "get_binding",
     "migrate",
-    "configure_org_resolver",
     "open_instance",
     "reassign",
     "register_assignee_resolver",
