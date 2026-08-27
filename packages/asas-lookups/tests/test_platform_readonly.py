@@ -230,8 +230,12 @@ def test_find_org_shadows_lists_only_legacy_collisions(seeded, org):
     with Session(seeded) as s:
         assert service.find_org_shadows(s) == []
         type_ = service.get_type(s, "gender")
-        # a legacy shadow (predates #26's guards) and a harmless org-only value
+        # a legacy shadow (predates #26's guards) and a harmless org-only
+        # value. One flush per row: a multi-row VALUES insert makes
+        # SQLAlchemy cast status to the native enum type name, which the
+        # migration-built Postgres schema (VARCHAR column) doesn't have.
         s.add(LookupValue(type_id=type_.id, code="male", org_id=7))
+        s.flush()
         s.add(LookupValue(type_id=type_.id, code="org-only", org_id=7))
         s.commit()
         assert service.find_org_shadows(s) == [("gender", "male", 7)]
