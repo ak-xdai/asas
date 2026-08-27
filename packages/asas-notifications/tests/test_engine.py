@@ -44,7 +44,7 @@ def test_actor_exclusion_and_dedupe(session, kind):
 
 def test_recipient_filter_applies_with_record(session, kind):
     notifications.configure_recipient_filter(
-        lambda s, ids, entity_type, record: [u for u in ids if u != 3]
+        lambda s, ids, entity_type, entity_id, record: [u for u in ids if u != 3]
     )
     rows = emit(
         session, kind, [1, 3], record=object(), entity_type="team", entity_id=9
@@ -194,7 +194,7 @@ def test_record_without_entity_type_fails_loud_not_unfiltered(session, kind):
     the filter would have dropped. "Must never leak a private record" means
     the producer bug fails loud instead."""
     notifications.configure_recipient_filter(
-        lambda s, ids, entity_type, record: [u for u in ids if u != 3]
+        lambda s, ids, entity_type, entity_id, record: [u for u in ids if u != 3]
     )
     with pytest.raises(ValueError, match="entity_type"):
         emit(session, kind, [1, 3], record=object(), entity_id=9)
@@ -206,21 +206,26 @@ def test_record_without_entity_type_fails_loud_not_unfiltered(session, kind):
     assert [n.user_id for n in rows] == [1, 3]
 
 
-def test_entity_type_without_record_fails_loud_not_unfiltered(session, kind):
-    """The symmetric hole, and the one that actually leaked in a real host.
+def test_the_filter_runs_even_without_the_record(session, kind):
+    """The hole this closed: filtering used to depend on the producer passing
+    `record`, so a producer that only had `(entity_type, entity_id)` skipped it
+    silently and every named recipient was notified.
 
-    Naming an entity_type without its record skipped the visibility filter just
-    as silently as the reverse. A host that configured a filter has declared
-    some records restricted; a notification about one of those entities that
-    cannot be filtered is precisely what the filter exists for, and by the time
-    anyone could redact it the title is already in an inbox.
+    Requiring `record` at the call site was the first attempt and was wrong — a
+    generic producer legitimately cannot load an arbitrary subject. The filter
+    runs regardless, receives the id, and decides.
     """
-    notifications.configure_recipient_filter(
-        lambda s, ids, entity_type, record: [u for u in ids if u != 3]
-    )
-    with pytest.raises(ValueError, match="requires record="):
-        emit(session, kind, [1, 3], entity_type="project", entity_id=9)
-    assert session.exec(select(Notification)).all() == []
+    seen = {}
+
+    def _filter(s_, ids, entity_type, entity_id, record):
+        seen.update(entity_type=entity_type, entity_id=entity_id, record=record)
+        return [u for u in ids if u != 3]
+
+    notifications.configure_recipient_filter(_filter)
+    rows = emit(session, kind, [1, 3], entity_type="project", entity_id=9)
+
+    assert [n.user_id for n in rows] == [1]
+    assert seen == {"entity_type": "project", "entity_id": 9, "record": None}
 
 
 def test_a_subjectless_notification_needs_no_record(session, kind):
@@ -230,7 +235,7 @@ def test_a_subjectless_notification_needs_no_record(session, kind):
     meaningless entity_type to satisfy it.
     """
     notifications.configure_recipient_filter(
-        lambda s, ids, entity_type, record: [u for u in ids if u != 3]
+        lambda s, ids, entity_type, entity_id, record: [u for u in ids if u != 3]
     )
     rows = emit(session, kind, [1, 3])
     assert [n.user_id for n in rows] == [1, 3]

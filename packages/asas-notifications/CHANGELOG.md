@@ -7,7 +7,22 @@ Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASI
 
 ## 0.13.0 — 2026-08-27
 
-- **`notify(entity_type=..., record=None)` now raises when a recipient filter is configured.** Naming an entity without its record skipped the visibility filter silently, so every named recipient was notified — including for a restricted record, whose title and body are already written by the time anything could redact them. This completes the symmetric guard added earlier for `record=` without `entity_type`. **Action for hosts:** pass `record=<the subject row>` at every `notify` call that carries an `entity_type`; omit `entity_type` only for notifications with no subject (a system announcement), which are unaffected. A host that has not configured a recipient filter is also unaffected (Teamy TEAMY-807).
+- **BREAKING: the recipient filter's signature gained `entity_id`.** It is now
+  called as `fn(session, user_ids, entity_type, entity_id, record)`. **Action
+  for hosts:** add the parameter to your filter.
+- **The filter now runs for every `notify` that names an `entity_type`**, not
+  only those that also passed `record=`. Filtering on `record is not None` let a
+  producer skip the visibility check silently just by not having the row to
+  hand — every named recipient was notified, including for a restricted subject,
+  and a notification is a *copy*, so there is no redaction pass afterwards.
+  `record` is still passed through when the producer has it and is `None`
+  otherwise; the id is always passed so the filter can resolve the row itself.
+  **Action for hosts:** make sure your filter tolerates `record=None` — an
+  entity type that needs no filtering should return `user_ids` unchanged.
+- Requiring `record=` at every call site was considered and rejected: a generic
+  producer (a workflow-event bridge) legitimately holds only the type and the
+  id and cannot load an arbitrary subject. Only the host knows which entity
+  types need gating, so the decision belongs in the filter (Teamy TEAMY-807).
 
 ## 0.12.0 — 2026-08-25
 
