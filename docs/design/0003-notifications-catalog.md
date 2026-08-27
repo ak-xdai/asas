@@ -1,245 +1,254 @@
-# DR 0003 (Asas): asas-notifications — persistent catalog and data-driven routing
+# DR 0003 (Asas): asas-notifications — action-referenced notifications and axis-based management
 
-Status: DRAFT for discussion · Author: ak@xdigit.ai (with Claude) · Date: 2026-08-26
+Status: DRAFT v2 for review · Author: ak@xdigit.ai (with Claude) · Date: 2026-08-27
+Supersedes: the 2026-08-26 v1 draft of this DR (persistent kind catalog), replaced
+in full after design review. Companion reading: the upstream author's adoption
+guide (2026-08, circulated as PDF), whose invariants this DR preserves.
 
-## 1. Problem
+## 1. Overview — concept, architecture, and agreed principles
 
-`asas-notifications` (v0.13.0) has a strong runtime core — transactional emit,
-per-channel outbox with CAS-claimed dispatch, archive/read axes — but all of its
-*configuration* lives in process memory and code:
+This DR updates the asas-notifications model in one sentence:
 
-- **The kind catalog is a module-level dict.** `service._KINDS` is populated by
-  `register_kind()` at wiring time and disappears on restart. Replicas can
-  drift; nothing outside the process can read or manage the catalog.
-- **Routing is hard-coded.** `_channels_for()` is three lines: urgency `low` →
-  in-app only, `normal`/`high` → email. Category and reason are carried on
-  every row ("the schema already carries all keys") but route nothing.
-- **Presentation is scattered.** Every producer composes `title`/`body` at the
-  call site; there is no template layer, no localization, and no way for a
-  product owner to change wording without a deployment.
-- **No admin or preference surface is possible.** With the catalog in memory
-  there is nothing for an admin API to CRUD and nothing for user preferences
-  to attach to.
+> A notification **references the application action that caused it** and carries
+> **four classification axes**; behavior is decided by rules attached to the
+> axes — never to individual event types — and the database stores only
+> deviations from code-declared defaults.
 
-Changing *any* notification behavior — enabling a channel, rewording an email,
-silencing a noisy kind — is a code change and a deployment. The proposal
-document this DR distills (asas-notifications evolution plan, 2026-08-26,
-circulated outside the repo) states the target: developers declare **what
-happened**; administrators configure **how it behaves** — at runtime, in the
-database, through a packaged admin interface.
+It replaces two things in the current design: the package-private `kind`
+vocabulary (a shadow copy of the application's own action vocabulary) and the
+in-memory registration ceremony (`register_kind`). It deliberately does **not**
+replace any runtime machinery: the transactional emit, the outbox, dispatch,
+and the feed model are untouched.
 
-## 2. Goals and non-goals
+### The control split (the architecture in one table)
 
-Goals (this DR):
+| Tier | Decides | Lives in |
+|---|---|---|
+| **Developer** | what each emit *is*: action, axes, entity, template choice, coalescing eligibility | code |
+| **Admin / product owner** | what the axes *mean*: routing policy, mandatory floors, topic definitions, template wording and locales | database |
+| **User** | what *reaches them*: per-topic and per-reason channel preferences (narrowing only) | database |
 
-- G-1 The database is the single runtime source of truth for notification
-  configuration. No YAML/companion source; the future admin API writes rows.
-- G-2 A stable event identity (`kind.key`) whose behavior — grouping, urgency,
-  channels, enablement, coalescing — is resolved from the database at emit.
-- G-3 Category-level user preferences (a handful of groups), never
-  per-event-kind preference rows.
-- G-4 Preserve the current invariants unchanged: emit rides the producer's
-  transaction; the insert IS the enqueue; dispatch stays at-least-once with
-  CAS claims; visibility filtering never leaks a private record.
-- G-5 A compatibility path where existing `register_kind()` callers keep
-  working through one deprecation cycle.
+### Agreed principles (the record of the design discussion)
 
-Non-goals (deliberately out, per the proposal's own §22):
+- **P-1 One namespace.** Notifications do not maintain a terminology analogous
+  to the application's actions. The emit passes the action that triggered it
+  (`action="job.publish"`) as a *reference without declaration* — a free string
+  in the app's `entity.verb` grammar, registered nowhere.
+- **P-2 Identity at the leaf, management on the axes.** The action string is
+  identity (provenance, coalescing, analytics). All *management* — routing,
+  preferences, floors — attaches to four coarse axes that are total over all
+  present and future emits, so a new action needs zero setup to be governed.
+- **P-3 Imperative tense, success semantics.** The action is named in the
+  imperative (`job.publish`, the same id a permission system would use), and
+  `notify()` is called only on success — inside the committing transaction, an
+  invariant the package already enforces by construction. No parallel
+  past-tense "fact"/"event" vocabulary is introduced.
+- **P-4 Admins do not manage application logic.** Per-event-type admin control
+  ("mute `vcs.pr_opened`") is deliberately excluded: it is application behavior
+  reached through a settings screen. If one emit is miscalibrated, that is a
+  code fix to its axes.
+- **P-5 The database stores deviations, not the universe.** No table enumerates
+  the app's events. Config rows exist only where someone changed a default:
+  a policy row, a preference row, a template.
+- **P-6 Nothing to forget.** There is no registration step whose omission
+  silently misroutes an event. Every emit is self-contained; validation
+  (§4, I-4) checks references, not ceremonies.
+- **P-7 Preserve the engine.** Everything the adoption guide sells stays
+  bit-for-bit: emit rides the producer's transaction (insert IS the enqueue),
+  CAS-claimed at-least-once dispatch, actor exclusion, visibility filtering at
+  the emit boundary, read/archived as independent axes, badge rule, and the
+  channel-agnostic adapter payload as a stability contract.
 
-- The admin React UI and end-user React components (follow-up DR; they also
-  force a JS workspace decision on the repo that deserves its own record).
-- Templates/localization *implementation* (the table is designed here so the
-  catalog schema is stable; rendering ships in a later phase).
-- Real-time delivery (SSE/WebSocket), retention policies, delivery dashboards.
-- Any new infrastructure: no Redis, no message bus, no separate service.
+## 2. Current model — areas of improvement
 
-## 3. Concepts — and one naming collision to resolve first
+The current model (v0.13, as documented in the adoption guide):
 
-The proposal reuses the word **category** for its user-facing preference groups
-(`Approvals`, `Mentions`, `Activity`…). The package already has a `Category`
-enum — `action` / `info` / `warning` — which is a *display semantic*: it drives
-the feed's `?category=` filter and Teamy's "needs action" tab. These are
-different dimensions and must not be merged; repurposing the existing column
-would silently break the feed API contract.
+- **A-1 The kind catalog is process memory.** `register_kind()` populates a
+  module dict at boot; replicas can drift, nothing outside the process can
+  read it, and every behavioral change is a deployment.
+- **A-2 `kind` duplicates the application's vocabulary.** Teamy's 13 kinds
+  (`workflow.approval_requested`, `vcs.pr_opened`, …) are restatements of
+  application actions under a second, package-private naming scheme that the
+  host must keep aligned by hand — the exact multi-catalog problem Asas will
+  otherwise repeat across RBAC, audit, and workflow as the package count grows.
+- **A-3 Registration is a ceremony with runtime-only failure.** Forgetting
+  `register_kind` fails loud (good) but only when the code path first runs
+  (late), and the ceremony exists solely to feed defaults that could travel on
+  the emit itself.
+- **A-4 Routing is three hard-coded lines.** urgency `low` → in-app only,
+  else → email. Category and reason are carried on every row but route nothing
+  ("reserved", per the guide).
+- **A-5 No preference surface.** The guide says it plainly: "there is no
+  per-user preference engine yet … budget for both." There is also no grouping
+  axis for one to attach to — kinds are too granular to be the preference unit.
+- **A-6 Presentation is compiled in.** Titles and bodies are composed at call
+  sites; product owners cannot edit wording, and there is no localization path
+  (Arabic/English matters for the target deployments).
 
-This DR therefore uses two names:
+## 3. Design — specific suggestions
 
-| Term | What it answers | Cardinality | Who sees it |
-|---|---|---|---|
-| `category` (existing enum) | How should the UI treat this row? | 3, fixed | The feed API/UI |
-| `preference_group` (new) | Which knob controls this? | ~5–8 per deployment | Users, admins |
+### S-1 The emit carries four axes
 
-`reason` (`requested`/`participant`/`watching` — GitHub's participating-vs-
-watching, generalized) stays as emit metadata and gains an *optional* seat in
-routing policy (D-2). `kind` remains the stable event identity.
-
-## 4. Data model
-
-Runtime tables (`notification`, `notification_delivery`) stay as they are, with
-one addition: a nullable `data` JSON column on `notification` (D-3). Four
-configuration tables are added, all package-owned via the existing Alembic
-chain:
-
-### 4.1 `notification_kind`
-
-| column | notes |
-|---|---|
-| `id`, `created_at`, `updated_at` | |
-| `key` | unique, e.g. `approval.requested` — the value producers emit |
-| `name`, `description` | admin-facing |
-| `preference_group_id` | FK → `notification_preference_group` |
-| `category` | display enum (`action`/`info`/`warning`), default for emits |
-| `default_urgency` | `low`/`normal`/`high` |
-| `default_reason` | default when the emit passes none |
-| `enabled` | disabled kinds emit nothing (in-app included) |
-| `coalesce` | replaces the per-call `coalesce_unread` flag as the default |
-| `auto_created` | true when created by the unknown-kind path (D-5) |
-
-### 4.2 `notification_preference_group`
-
-| column | notes |
-|---|---|
-| `id`, `created_at`, `updated_at` | |
-| `key`, `name`, `description` | e.g. `approvals` / "Approvals" |
-| `user_configurable` | groups like `security` can be locked |
-| `sort_order` | preference-screen ordering |
-
-### 4.3 `notification_channel_policy`
-
-| column | notes |
-|---|---|
-| `id`, `created_at`, `updated_at` | |
-| `preference_group_id` | nullable — group-level default |
-| `kind_id` | nullable — kind-level override (exceptional) |
-| `reason` | nullable — condition on the recipient's reason (D-2) |
-| `channel` | `in_app`, `email`, `teams`, … (free string, adapter-keyed) |
-| `enabled` | |
-| `mandatory` | user preferences cannot disable (e.g. security → email) |
-
-Exactly one of `preference_group_id`/`kind_id` is set (CHECK constraint).
-Resolution precedence is in §5.
-
-### 4.4 `notification_user_preference`
-
-| column | notes |
-|---|---|
-| `id`, `created_at`, `updated_at` | |
-| `user_id` | plain int, no host FK (extraction rule) |
-| `preference_group_id` | preferences attach to groups, never kinds (G-3) |
-| `channel` | |
-| `enabled` | |
-
-Unique on (`user_id`, `preference_group_id`, `channel`). Absence of a row means
-"use the policy default" — the table stores only deviations, so changing an
-org-wide default later doesn't require backfilling every user.
-
-### 4.5 `notification_template` (schema now, implementation Phase E)
-
-(`kind_id`, `channel`, `locale`, `title_template`, `body_template`, `enabled`);
-unique on (`kind_id`, `channel`, `locale`). English/Arabic are the first two
-locales the rendering phase must support.
-
-**Org scoping of the catalog (D-6):** all five configuration tables are
-deployment-global — no `org_id`. Notification *rows* are tenant data; the
-*catalog* is product configuration, like code was before. Per-org overrides, if
-ever needed, arrive as nullable `org_id` override rows on the policy and
-preference-group tables — an additive change, not a redesign. (Aligns with DR
-0001's separation of tenant data from deployment configuration.)
-
-## 5. Runtime resolution
-
-`notify()` becomes:
-
-```
-resolve kind by key (cached, D-4)
-  └ unknown → per-deployment mode (D-5)
-kind.enabled? no → return []          (nothing inserted, in-app included)
-category  = per-emit override | kind.category
-urgency   = per-emit override | kind.default_urgency
-reason    = per-emit override | kind.default_reason
-channels  = policy resolution:
-    start: kind-level policy rows (matching reason or reason IS NULL)
-    else:  group-level policy rows      (same matching)
-    else:  built-in fallback = today's rule (low → in-app only, else email)
-    then:  subtract user-disabled channels (never mandatory ones)
-in-app row + delivery rows inserted in the caller's transaction (unchanged)
+```python
+notifications.notify(
+    session, recipients,
+    action="job.publish",                    # S-2: reference, not declaration
+    topic="jobs",                            # management/preference grouping
+    nature="info",                           # action | info | warning
+    urgency="normal",                        # low | normal | high
+    reason="watching",                       # requested | participant | watching
+    entity_type="job", entity_id=job.id, record=job,
+    template="job_published",                # S-4: optional; title/body= fallback
+    data={"job_title": job.title},
+    actor_user_id=actor.id,
+)
 ```
 
-Notes:
+| Axis | Question | Values | Defined by | Prior art |
+|---|---|---|---|---|
+| `nature` | What does it demand of me? | action / info / warning | package (fixed) | today's `category` enum, renamed |
+| `topic` | What part of the product? | ~5–8 per app | host, seeded rows | Android channels; the plan's groups |
+| `urgency` | How interruptive? | low / normal / high | package (fixed) | Apple interruption levels |
+| `reason` | Why me? | requested / participant / watching | package (fixed) | GitHub reasons (unchanged) |
 
-- `in_app` becomes an explicit channel in policy (mandatory-able, e.g. a group
-  whose members may mute even the bell) but keeps its implementation: the
-  notification row itself, no delivery row.
-- User preferences are read at **emit** (they gate row creation); templates are
-  rendered at **dispatch** (D-3). A preference change therefore affects new
-  events, not queued ones — same model as every mainstream notifier.
-- The per-call `coalesce_unread` flag is deprecated in favor of
-  `kind.coalesce`; the org-context requirement from PR #20 stands.
+`nature`/`urgency`/`reason` are enums; `topic` is validated against the seeded
+topic table — the one reference an emit can get wrong that preferences and
+policy depend on, so an unknown topic fails loud (preserving the guide's
+fail-loud property exactly where it still has a job).
 
-## 6. Decisions
+Teamy's 13 kinds map onto ~6 topics with no orphans and no splits (evidence the
+cap holds on real data): approvals (4 workflow kinds), mentions, assignments,
+activity (3), code (2 vcs), system (2).
 
-- **D-1 Keep `category`, add `preference_group`.** The display enum and the
-  preference dimension are different concepts (§3). No migration of existing
-  rows; the feed API contract is untouched.
-- **D-2 `reason` stays, as optional policy input.** Policy rows may condition
-  on reason (`watching` never emails; `requested` always does) via one nullable
-  column. It never becomes a per-user preference dimension — that would
-  multiply the preference matrix for marginal value. If no deployment uses it
-  within two phases, we drop the column, not the concept.
-- **D-3 Render in-app at emit, external at dispatch.** The feed needs a
-  concrete `title` at insert; external channels re-render from
-  `notification.data` + template at dispatch, so template edits apply to
-  not-yet-sent deliveries and per-recipient locale is resolved where the
-  recipient is known. Producers may still pass explicit `title`/`body`
-  (ad hoc notifications keep working; they simply have no kind-level config).
-- **D-4 Catalog reads are cached in-process, TTL ≤ 60s.** `notify()` runs
-  inside hot business transactions; per-emit catalog queries are unacceptable.
-  The existing `_KINDS` dict becomes that cache. Admin changes propagate
-  within the TTL across replicas; no cross-replica invalidation bus (non-goal).
-- **D-5 Unknown kinds: wiring-time mode, default = today's fail-loud.**
-  `configure_catalog(on_unknown="reject" | "create")`. `create` (dev
-  convenience) inserts a disabled-external, `low`-urgency, uncategorized kind
-  flagged `auto_created` and logs it. Production deployments keep `reject`;
-  an `asas-notifications validate` CLI (compares emitted-kind inventory against
-  the catalog) ships in the same phase so CI can gate deploys. Auto-creation
-  never happens silently in prod.
-- **D-6 Catalog is deployment-global** (§4, org scoping note).
-- **D-7 Urgency stays `low`/`normal`/`high`.** No `critical` until a real
-  escalation behavior needs it (proposal §11 says the same).
-- **D-8 `register_kind()` becomes a seed, then deprecated.** Phase A: it
-  upserts missing kinds/groups at startup and never overwrites existing rows —
-  the database wins. Phase B: it warns; the catalog is authoritative. One
-  release later it is removed.
+### S-2 `action` replaces `kind`: reference without declaration
 
-## 7. Rollout (the implementing PRs)
+The `kind` column becomes `action`. It is passed on every non-ad-hoc emit and
+declared nowhere. It serves exactly three purposes:
 
-- **Phase A** — migrations for the five tables; `register_kind()` upserts;
-  resolution still reads the in-memory registry. Pure additive, no behavior
-  change.
-- **Phase B** — `notify()` resolves from the database through the D-4 cache;
-  policy resolution (§5) replaces `_channels_for()`; built-in fallback keeps
-  today's behavior for catalogs with no policy rows. `validate` CLI + D-5 mode.
-- **Phase C** — admin CRUD API (`build_admin_router(get_session)`, host applies
-  auth; audit via the shared Asas audit capability if one exists by then).
-- **Phase D** — user preference API + resolution step.
-- **Phase E** — templates + rendering (dispatch-side), `data` column usage,
-  English + Arabic.
-- **Phase F+** — admin UI / React components / operations dashboard: separate
-  DR after the JS-workspace decision.
+1. **Provenance** — which application action produced this row (debugging,
+   analytics, feed iconography).
+2. **Coalescing identity** — see S-5.
+3. **The future join key** — if/when an application actions layer exists
+   (declared actions driving permissions/audit/tooling), this column already
+   speaks its namespace: a validate step can cross-check emitted actions
+   against declared ones, and an actions runtime can stamp the column
+   automatically, all without schema change. This DR does not depend on or
+   design that layer.
 
-Each phase is a reviewable PR against the current test matrix (SQLite +
-Postgres); Phase B must land with routing-equivalence tests proving an empty
-catalog reproduces today's urgency rule exactly.
+One action may legitimately produce several notifications (watchers ambiently
+and the owner directly, from one `job.publish`): distinct emits, distinct
+axes/templates, same action. The action is provenance, not a unique key.
 
-## 8. Open questions for review
+Ad hoc notifications (`notify(title=..., urgency="low")`, no action) remain for
+genuine one-offs; they carry axes but no action or template.
 
-1. **`in_app` as a policy channel (§5):** worth the generality, or should the
-   bell stay unconditional and policy govern external channels only?
-2. **Ad hoc notifications (no kind):** keep them fully outside the catalog
-   (current lean), or require a reserved `system.adhoc` kind so they are at
-   least group-able for preferences?
-3. **`suppressed()` interaction:** should suppression also skip catalog
-   auto-creation in `create` mode, or is discovering kinds during bulk imports
-   desirable?
-4. **Does Phase C block on the shared audit capability**, or ship with a
-   package-local audit table and migrate later?
+### S-3 The database stores deviations: five small tables, no catalog
+
+| Table | Keyed by | Holds |
+|---|---|---|
+| `notification_topic` | `key` | the seeded topic list: name, description, `user_configurable`, `sort_order` |
+| `notification_channel_policy` | (`topic` \| axis condition) × `channel` | enabled / mandatory rows; the routing table |
+| `notification_topic_preference` | `user_id` × `topic` × `channel` | user deviations from policy |
+| `notification_reason_preference` | `user_id` × `reason` × `channel` | e.g. "email me only when requested" |
+| `notification_template` | `key` × `channel` (× `locale`, later) | product-editable title/body templates |
+
+There is **no** table of event types. Empty policy tables must reproduce
+today's behavior exactly (urgency low → in-app only; normal/high → email) via
+built-in fallback rows — the Phase-2 equivalence tests in §5 prove it.
+
+### S-4 Templates by explicit reference
+
+Code chooses *which* template (`template="approval_requested"`); the DB row
+owns *what it says*. No template row → the emit's inline `title`/`body` render
+as-is. Localization arrives later as per-locale template rows resolved at
+dispatch; the renderer sits between the outbox and the adapter, so the
+`DeliveryPayload` an adapter receives is unchanged (P-7).
+
+### S-5 Resolution rule
+
+```
+channels(emit) =
+      policy(topic, nature, urgency)          # admin routing table, floors marked mandatory
+    ∧ topic_preference(user, topic)           # user narrowing
+    ∧ reason_preference(user, reason)         # user narrowing
+    with mandatory channels exempt from both preference filters
+```
+
+Preferences compose by **narrowing only** (each rule can remove channels, never
+add), so the two preference dimensions AND cleanly without a topic×reason×
+channel cube. Coalescing keys on **(recipient, action, entity)** — the same
+granularity as today's kind-based folding (edit bursts fold; comments on the
+same entity stay separate) — still requires an org context (PR #20), and still
+applies only when the resolved channels are in-app only. Note the coupling that
+creates: a policy change that routes a topic externally also stops its
+coalescing. Correct, but an admin surface must say so.
+
+### S-6 Admin scope
+
+Admins manage: topics, the routing policy table, mandatory floors, template
+wording/locales, and (from PR #20's groundwork) delivery operations. Admins do
+**not** manage individual actions (P-4). The admin API/UI ships against the
+five S-3 tables and is therefore small.
+
+## 4. Implications
+
+- **I-1 Per-event runtime tuning requires a deploy — by design.** The v1-draft
+  catalog allowed an admin to re-urgency one event type at runtime; this design
+  trades that for P-4. Accepted explicitly in review.
+- **I-2 Feed API field rename.** `kind` → `action` and `category` → `nature`
+  appear in `NotificationRead` and the `?category=` filter. Pre-1.0 breaking
+  minor bump; the filter keeps `category` as a deprecated alias for one release.
+- **I-3 `register_kind()` becomes a shim, immediately.** No phased catalog
+  life: the shim maps a registered kind's (category/urgency/reason) to axis
+  defaults applied when `notify()` is called with a legacy kind string and no
+  axes, warns on use, and is removed one minor release later. The guide's boot
+  wiring keeps working through the deprecation window.
+- **I-4 Validation shrinks to references.** `asas-notifications validate`
+  checks: every `template=` reference resolves; every `topic=` exists; (later)
+  every `action=` exists in the host's declared actions, when a host has such a
+  list. No catalog sync to verify — there is no catalog.
+- **I-5 What is lost, on the record:** per-event admin mute (P-4, code fix
+  instead), per-event analytics keyed by a curated catalog (action strings +
+  topic serve instead), and the v1 draft's auto-create/`validate`-the-catalog
+  machinery (obsolete — nothing to create).
+- **I-6 Relationship to open DRs.** DR 0001 (tenancy): config tables are
+  deployment-global, org-free, per DR 0001's data/config split; notification
+  rows remain tenant data. The channel-cascade DR 0002 (escalation) composes:
+  cascade steps are a *policy-layer* concern (which channel, then which) and
+  attach to the S-3 policy table, not to actions. Numbering collision between
+  the two circulating "DR 0002"s still needs resolving; unaffected by this DR.
+
+## 5. Specific updates to be made (the implementing PRs)
+
+1. **U-1 Schema + emit.** Migration: rename `notification.kind` → `action`
+   (nullable now — ad hoc emits), `category` → `nature`, add `topic` (indexed),
+   `data` JSON, `template` ref. New `notify()` signature with the four axes;
+   `register_kind` shim per I-3; feed filter alias per I-2. Version bump
+   (breaking minor).
+2. **U-2 Topics + policy + resolution.** `notification_topic` +
+   `notification_channel_policy` tables; resolution (S-5) replaces
+   `_channels_for()`; built-in fallback = today's rule; **equivalence tests**:
+   empty tables reproduce v0.13 routing decisions for the full Teamy catalog
+   mapped to axes.
+3. **U-3 Preferences.** Both preference tables, the AND rule, mandatory-floor
+   exemption, `/me/notification-preferences` API. Two-org and both-engine tests.
+4. **U-4 Templates + renderer.** Template table, dispatch-side rendering,
+   `DeliveryPayload` unchanged; missing-variable detection; locale column
+   landed but only `en` resolved (Arabic in the localization follow-up).
+5. **U-5 Admin API.** CRUD routers for topics/policy/templates behind
+   host auth (`build_admin_router(get_session)`); audit hooks if the shared
+   audit capability exists by then, else a TODO referencing it.
+6. **U-6 Validate CLI** per I-4, CI-friendly exit codes.
+
+Each phase is one reviewable PR, SQLite + Postgres green, version-bumped per
+RELEASING.md. U-1/U-2 are the substance; U-3–U-6 are additive.
+
+## 6. Open questions for review
+
+1. `action` nullable (ad hoc emits) or required with a reserved `system.adhoc`
+   value — which failure mode do we prefer for lazy producers?
+2. Does the reason-preference UI ship in U-3, or does the table land with the
+   API exposing topics only until a host asks for it?
+3. Coalesced digest titles: keep `merge_body` as the producer's hook (status
+   quo), or move merging into templates once U-4 lands?
+4. The `?category=` alias window: one release or two?
