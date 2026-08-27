@@ -30,7 +30,7 @@ new tag is cut. Until then, install it straight from your clone:
 ```bash
 git clone https://github.com/wlootah-a11y/asas.git   # or `git pull` if you already have it
 cd asas
-git checkout add-dev-entry-point                      # this branch, until it's merged
+git checkout example/helpdesk                         # this branch, until it's merged
 
 python3 --version   # needs >= 3.11 — every Asas package requires it. If this
                      # prints something older, point the next line at a newer
@@ -53,8 +53,8 @@ already tagged and published on GitHub, so a real end-to-end smoke test
 works right now:
 
 ```bash
-asas new /tmp/asas-smoke-test --with ratelimit,lookups --dir /tmp
-cd /tmp/asas-smoke-test && pip install -e '.[dev]'
+asas new asas-smoke-test --with ratelimit,lookups --dir /tmp
+cd /tmp/asas-smoke-test && pip install -e '.[dev]' && pytest -q
 ```
 
 Running the CLI's own test suite:
@@ -82,7 +82,8 @@ asas add ratelimit --version 0.11.0 --path ./services/api/pyproject.toml
 ## `asas new <name> --with <keys>`
 
 Scaffolds `<name>/main.py`, `settings.py`, `pyproject.toml`, `README.md`,
-and `.env.example`, wired for whichever packages you list. The generated
+`.env.example`, and `tests/test_smoke.py` (the generated project's own
+boots-with-zero-edits check), wired for whichever packages you list. The generated
 `main.py` is **plain, editable Python** — the same manual `migrate` →
 `seed` → `build_routers` → `include_router` sequence you'd write by hand
 following each package's host contract, just typed for you. It is not a
