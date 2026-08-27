@@ -12,8 +12,8 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import or_
-from sqlalchemy.orm import selectinload
+from sqlalchemy import exists, or_
+from sqlalchemy.orm import aliased, selectinload
 from sqlmodel import Session, select
 
 from .models import (
@@ -87,6 +87,31 @@ def _value_by_code(session: Session, type_id: int, code: str) -> Optional[Lookup
         session,
     ).order_by(LookupValue.org_id.is_(None))  # org override (False) sorts first
     return session.exec(stmt).first()
+
+
+def find_org_shadows(session: Session) -> list[tuple[str, str, int]]:
+    """``(type_key, code, org_id)`` for every org row sharing a code with a
+    platform row of the same type — legacy shadows under the no-override model
+    (issue #24): #26 blocks creating new ones (409 on collision, 403 on
+    platform writes), but rows predating it still shadow platform values in
+    their org's reads. Hosts run this ahead of the explicit type-scope
+    migration and resolve each deliberately (delete the org row, or move it to
+    a new code)."""
+    platform = aliased(LookupValue)
+    rows = session.exec(
+        select(LookupType.key, LookupValue.code, LookupValue.org_id)
+        .join(LookupType, LookupType.id == LookupValue.type_id)
+        .where(LookupValue.org_id.is_not(None))
+        .where(
+            exists().where(
+                platform.type_id == LookupValue.type_id,
+                platform.code == LookupValue.code,
+                platform.org_id.is_(None),
+            )
+        )
+        .order_by(LookupType.key, LookupValue.code, LookupValue.org_id)
+    ).all()
+    return [tuple(r) for r in rows]
 
 
 def value_exists(session: Session, type_key: str, code: str) -> bool:
@@ -202,12 +227,29 @@ def get_value_read(
             status_code=404, detail=f"Unknown code '{code}' in '{type_.key}'"
         )
     if follow_supersede and value.superseded_by_id is not None:
-        replacement = session.get(LookupValue, value.superseded_by_id)
+        # Scoped, not session.get (DR 0001 T3, issue #33 / audit defect T-8):
+        # a pointer into a row outside the caller's visible set (another
+        # org's row) behaves as absent rather than leaking that org's labels.
+        replacement = session.exec(
+            _org_scoped(
+                select(LookupValue).where(
+                    LookupValue.id == value.superseded_by_id
+                ),
+                session,
+            )
+        ).first()
         if replacement:
             value = replacement
     code_map = {value.id: value.code}
     if value.parent_id is not None:
-        parent = session.get(LookupValue, value.parent_id)
+        # Same scoping for the parent pointer — a foreign-org parent must not
+        # leak its code into the serialized read.
+        parent = session.exec(
+            _org_scoped(
+                select(LookupValue).where(LookupValue.id == value.parent_id),
+                session,
+            )
+        ).first()
         if parent:
             code_map[parent.id] = parent.code
     return serialize_value(value, lang, code_map)

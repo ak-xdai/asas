@@ -24,18 +24,19 @@ from .seeding import (  # noqa: F401
     ensure_value,
     seed_lookups as seed,
 )
-from .service import configure_org_resolver
+from .service import configure_org_resolver, find_org_shadows
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 
 __all__ = [
     "Routers",
+    "__version__",
     "build_routers",
+    "bump_version_if",
     "configure_org_resolver",
-    "migrate",
-    "seed",
     "ensure_type",
     "ensure_value",
-    "bump_version_if",
-    "__version__",
+    "find_org_shadows",
+    "migrate",
+    "seed",
 ]
