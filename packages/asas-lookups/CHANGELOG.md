@@ -5,6 +5,21 @@ Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
+## 0.12.0 — 2026-08-27
+
+- **Breaking: platform lookup values are read-only for organizations** (issue #24;
+  decides DR 0001's D2 the reject way). An org-context `update_value`,
+  `deprecate_value`, `add_alias`, `remove_alias` or `merge_values` whose target
+  resolves to a platform row (`org_id IS NULL`) now raises **403** instead of
+  silently mutating the row every tenant shares (audit defect T-1). The new
+  `_value_for_write` keeps the write path's row selection separate from the read
+  path's org-or-global fallback; orgs keep full control of the values they
+  created, and platform scope (no org resolver) edits global rows unchanged.
+- **Seeding owns platform rows only** (audit defect T-5): existence checks
+  predicate on `org_id IS NULL`, so an org-minted row sharing a seed code no
+  longer suppresses the platform default — re-seeding heals it — and the
+  salutation `show_in_name` backfill can no longer land on an org row.
+
 ## 0.11.0 — 2026-08-25
 
 - **Breaking: the library no longer seeds a host's own vocabulary.** `seed(session)` previously wrote seventeen lookup types that belonged to Teamy rather than to any people system — work-item statuses and types, project health, risk and issue categories, team categories, contract types, social platforms, next-of-kin relationships, office locations, and the open CV vocabularies (skill, company, degree, field of study, education institution, awarding body, training provider). A second host acquired all of it at boot, with no error.
