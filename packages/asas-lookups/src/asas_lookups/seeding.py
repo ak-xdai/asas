@@ -169,20 +169,32 @@ def seed_org_lookups(session: Session, org_id: int) -> int:
                 session.add(LookupAlias(value_id=copy.id, alias=a.alias, lang=a.lang))
             copies[tmpl.id] = copy
             type_created += 1
-        # Second pass: parent pointers land on the org's own rows — a fresh
-        # copy, or a row the org already had (which idempotency skipped) —
-        # never back into the template.
+        def org_row_for(template_id: Optional[int]) -> Optional[LookupValue]:
+            # A template row id resolved to the org's own row: the copy made
+            # in this call, or the row the org already had for that code
+            # (which idempotency skipped).
+            if template_id is None:
+                return None
+            row = copies.get(template_id)
+            if row is None:
+                ref = tmpl_by_id.get(template_id)
+                if ref is not None:
+                    row = own_by_code.get(ref.code)
+            return row
+
+        # Second pass: parent and supersede pointers land on the org's own
+        # rows — never back into the template.
         for tmpl in templates:
             copy = copies.get(tmpl.id)
-            if copy is None or tmpl.parent_id is None:
+            if copy is None:
                 continue
-            parent = copies.get(tmpl.parent_id)
-            if parent is None:
-                parent_tmpl = tmpl_by_id.get(tmpl.parent_id)
-                if parent_tmpl is not None:
-                    parent = own_by_code.get(parent_tmpl.code)
+            parent = org_row_for(tmpl.parent_id)
             if parent is not None:
                 copy.parent_id = parent.id
+            successor = org_row_for(tmpl.superseded_by_id)
+            if successor is not None:
+                copy.superseded_by_id = successor.id
+            if parent is not None or successor is not None:
                 session.add(copy)
         if type_created:
             # The read-API ETag keys on the type version: without a bump, an

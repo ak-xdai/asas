@@ -208,6 +208,43 @@ def test_seed_remaps_parent_to_an_existing_org_row(seeded, vocab, org):
         assert rows["python"].parent_id == rows["engineering"].id
 
 
+def test_seed_remaps_supersede_pointer_to_org_copy(seeded, vocab, org):
+    """A deprecated template value keeps its replacement link after the copy:
+    ``superseded_by_id`` is remapped into the org-owned set the same way
+    ``parent_id`` is, so supersession still resolves for the org."""
+    from asas_lookups.models import LookupStatus
+
+    with Session(seeded) as s:  # template: "cobol" deprecated, points at "python"
+        type_ = service.get_type(s, vocab)
+        ensure_value(s, type_.id, "cobol", [("en", "COBOL")])
+        tmpl = {
+            v.code: v
+            for v in s.exec(
+                select(LookupValue).where(
+                    LookupValue.type_id == type_.id, LookupValue.org_id.is_(None)
+                )
+            ).all()
+        }
+        tmpl["cobol"].status = LookupStatus.deprecated
+        tmpl["cobol"].superseded_by_id = tmpl["python"].id
+        s.add(tmpl["cobol"])
+        s.commit()
+
+    with Session(seeded) as s:
+        assert seed_org_lookups(s, 7) == 3
+        type_ = service.get_type(s, vocab)
+        rows = {
+            v.code: v
+            for v in s.exec(
+                select(LookupValue).where(
+                    LookupValue.type_id == type_.id, LookupValue.org_id == 7
+                )
+            ).all()
+        }
+        assert rows["cobol"].status == LookupStatus.deprecated
+        assert rows["cobol"].superseded_by_id == rows["python"].id
+
+
 def test_seed_org_lookups_bumps_type_version(seeded, vocab):
     """The read-API ETag keys on the type version: a seed that creates rows
     must bump it, or an org that cached a pre-seed (empty) response keeps
