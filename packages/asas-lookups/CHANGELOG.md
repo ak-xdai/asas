@@ -1,9 +1,22 @@
 # Changelog — `asas-lookups`
 
-Versions follow semver, and the git tag matches this file: `asas-lookups/v0.12.0`.
+Versions follow semver, and the git tag matches this file: `asas-lookups/v0.12.1`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.12.1 — 2026-08-27
+
+- **Supersede and parent pointers resolve through the caller's read scope**
+  (issue #33, audit defect T-8). Both follows in `get_value_read` were bare
+  `session.get` calls — a pointer landing in another org's row served that
+  org's labels (or leaked its code) to a stranger. A pointer outside the
+  caller's visible set now behaves as absent.
+- **New `find_org_shadows(session)`** (exported): lists `(type_key, code,
+  org_id)` for every legacy org row sharing a code with a platform row of the
+  same type. Under the no-override model (issue #24) these are data to
+  resolve deliberately — 0.12.0 blocks creating new ones, but rows predating
+  it still shadow platform values in their org's reads.
 
 ## 0.12.0 — 2026-08-27
 

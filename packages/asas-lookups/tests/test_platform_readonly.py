@@ -178,3 +178,60 @@ def test_seed_restores_platform_row_despite_org_row(seeded, org):
         orgs = _org_rows(s, type_, "female")
         assert len(orgs) == 1  # the org's own row untouched
         assert {t.label for t in orgs[0].translations} == {"Org female"}
+
+
+# ── read-side scoping and legacy shadows (issue #33: audit defect T-8) ───────
+
+
+def test_supersede_pointer_never_leaks_foreign_org_labels(seeded, org):
+    """Defect T-8: the supersede follow was a bare session.get — a pointer
+    landing in another org's row served that org's labels to a stranger. A
+    pointer outside the caller's visible set behaves as absent."""
+    from asas_lookups.models import LookupTranslation
+
+    with Session(seeded) as s:
+        type_ = service.get_type(s, "gender")
+        foreign = LookupValue(type_id=type_.id, code="org9-secret", org_id=9)
+        s.add(foreign)
+        s.flush()
+        s.add(LookupTranslation(value_id=foreign.id, lang="en", label="Org9 Secret"))
+        mine = LookupValue(
+            type_id=type_.id, code="legacy", org_id=7, superseded_by_id=foreign.id
+        )
+        s.add(mine)
+        s.flush()
+        s.add(LookupTranslation(value_id=mine.id, lang="en", label="My Legacy"))
+        s.commit()
+
+    org.org_id = 7
+    with Session(seeded) as s:
+        type_ = service.get_type(s, "gender")
+        read = service.get_value_read(s, type_, "legacy", "en", True)
+        assert read.label == "My Legacy"  # not "Org9 Secret"
+
+    # the pointer still follows normally inside the caller's own visible set
+    org.org_id = 9
+    with Session(seeded) as s:
+        type_ = service.get_type(s, "gender")
+        s.add(
+            LookupValue(
+                type_id=type_.id, code="old9", org_id=9,
+                superseded_by_id=s.exec(
+                    select(LookupValue).where(LookupValue.code == "org9-secret")
+                ).first().id,
+            )
+        )
+        s.commit()
+        read = service.get_value_read(s, type_, "old9", "en", True)
+        assert read.label == "Org9 Secret"
+
+
+def test_find_org_shadows_lists_only_legacy_collisions(seeded, org):
+    with Session(seeded) as s:
+        assert service.find_org_shadows(s) == []
+        type_ = service.get_type(s, "gender")
+        # a legacy shadow (predates #26's guards) and a harmless org-only value
+        s.add(LookupValue(type_id=type_.id, code="male", org_id=7))
+        s.add(LookupValue(type_id=type_.id, code="org-only", org_id=7))
+        s.commit()
+        assert service.find_org_shadows(s) == [("gender", "male", 7)]
