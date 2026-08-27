@@ -15,6 +15,7 @@ from .models import (
     LookupType,
     LookupValue,
     SortMode,
+    TypeScope,
 )
 
 # Closed (admin-managed) lists. Each value: code, en, ar.
@@ -86,13 +87,142 @@ def ensure_type(session: Session, **kwargs) -> LookupType:
     t = session.exec(
         select(LookupType).where(LookupType.key == kwargs["key"])
     ).first()
+    # Effective scope (issue #35): the explicit declaration, else the stored
+    # one for an existing type — an idempotent boot re-registration that omits
+    # scope must not judge is_open against the platform default — else the
+    # platform default for a new type.
+    explicit = kwargs.get("scope")
+    if explicit is not None:
+        scope = TypeScope(explicit)
+    else:
+        scope = t.scope if t else TypeScope.platform
+    # An open list means org users add values, which only an org-owned type
+    # can host — a platform type is never open.
+    if kwargs.get("is_open") and scope is not TypeScope.org:
+        raise ValueError(
+            f"lookup type {kwargs.get('key')!r}: is_open=True requires "
+            "scope='org' — platform types never accept org-added values"
+        )
     if t:
+        if explicit is not None and t.scope is not scope:
+            # A silently ignored mismatch would let a host believe its
+            # declaration took effect. Changing a type's scope moves ownership
+            # of every value (platform rows become an unserved template, or
+            # vice versa) — that is a deliberate data migration, never an
+            # ensure_type side effect.
+            raise ValueError(
+                f"lookup type {kwargs['key']!r} already exists with scope "
+                f"'{t.scope.value}', not '{scope.value}' — changing a type's "
+                "scope is a data migration, not something ensure_type does"
+            )
         return t
     t = LookupType(**kwargs)
     session.add(t)
     session.commit()
     session.refresh(t)
     return t
+
+
+def seed_org_lookups(session: Session, org_id: int) -> int:
+    """Copy every org-scoped type's platform-held starter template into
+    ``org_id``-owned rows (issue #35). The host calls this at org creation;
+    it is presence-idempotent per (type, code), so re-running — or
+    backfilling an existing org — never duplicates and never overwrites the
+    org's own edits. Returns the number of values created.
+
+    Platform template rows are never served to org reads; after this call the
+    org owns its list outright (template drift is accepted by design).
+    Hierarchies survive the copy: parent pointers are remapped to the org's
+    own copies in a second pass."""
+    created = 0
+    types = session.exec(
+        select(LookupType).where(LookupType.scope == TypeScope.org)
+    ).all()
+    for t in types:
+        templates = session.exec(
+            select(LookupValue).where(
+                LookupValue.type_id == t.id, LookupValue.org_id.is_(None)
+            )
+        ).all()
+        tmpl_by_id = {tmpl.id: tmpl for tmpl in templates}
+        own_by_code = {
+            row.code: row
+            for row in session.exec(
+                select(LookupValue).where(
+                    LookupValue.type_id == t.id, LookupValue.org_id == org_id
+                )
+            ).all()
+        }
+        copies: dict[int, LookupValue] = {}  # template id -> org copy
+        type_created = 0
+        for tmpl in templates:
+            if tmpl.code in own_by_code:
+                continue
+            copy = LookupValue(
+                type_id=t.id,
+                code=tmpl.code,
+                org_id=org_id,
+                status=tmpl.status,
+                is_default=tmpl.is_default,
+                sort_order=tmpl.sort_order,
+                valid_from=tmpl.valid_from,
+                valid_to=tmpl.valid_to,
+                meta=dict(tmpl.meta or {}),
+            )
+            session.add(copy)
+            # One flush per row: a multi-row VALUES insert casts to the
+            # native enum type name, which the migration-built Postgres
+            # schema (VARCHAR columns) doesn't have.
+            session.flush()
+            for tr in tmpl.translations:
+                session.add(
+                    LookupTranslation(
+                        value_id=copy.id,
+                        lang=tr.lang,
+                        label=tr.label,
+                        short_label=tr.short_label,
+                    )
+                )
+            for a in tmpl.aliases:
+                session.add(LookupAlias(value_id=copy.id, alias=a.alias, lang=a.lang))
+            copies[tmpl.id] = copy
+            type_created += 1
+        def org_row_for(template_id: Optional[int]) -> Optional[LookupValue]:
+            # A template row id resolved to the org's own row: the copy made
+            # in this call, or the row the org already had for that code
+            # (which idempotency skipped).
+            if template_id is None:
+                return None
+            row = copies.get(template_id)
+            if row is None:
+                ref = tmpl_by_id.get(template_id)
+                if ref is not None:
+                    row = own_by_code.get(ref.code)
+            return row
+
+        # Second pass: parent and supersede pointers land on the org's own
+        # rows — never back into the template.
+        for tmpl in templates:
+            copy = copies.get(tmpl.id)
+            if copy is None:
+                continue
+            parent = org_row_for(tmpl.parent_id)
+            if parent is not None:
+                copy.parent_id = parent.id
+            successor = org_row_for(tmpl.superseded_by_id)
+            if successor is not None:
+                copy.superseded_by_id = successor.id
+            if parent is not None or successor is not None:
+                session.add(copy)
+        if type_created:
+            # The read-API ETag keys on the type version: without a bump, an
+            # org that cached a response before being seeded (e.g. an empty
+            # list) would keep revalidating to 304 against stale content.
+            t.version += 1
+            session.add(t)
+        created += type_created
+    session.commit()
+    return created
 
 
 def ensure_value(

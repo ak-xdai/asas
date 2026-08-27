@@ -1,9 +1,44 @@
 # Changelog — `asas-lookups`
 
-Versions follow semver, and the git tag matches this file: `asas-lookups/v0.12.1`.
+Versions follow semver, and the git tag matches this file: `asas-lookups/v0.13.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.13.0 — 2026-08-27
+
+- **Breaking: every lookup type declares an explicit scope** (issue #35) —
+  `platform` (org-read-only reference data, the default) or `org` (org-owned
+  vocabulary). Nothing is inferred from `code_system` or `is_open` at runtime;
+  migration `0002` backfills existing types to `platform`, except legacy
+  `is_open` types which backfill to `org` (an open list means org users add
+  values, which only an org-owned type can host). The migration is resumable:
+  a `scope` column that already exists but still holds NULLs is backfilled
+  and tightened rather than skipped.
+- **Platform types are immutable to orgs in full**: org context now gets 403
+  on `create_value` too (previously an org could mint its own row on any type
+  while the code was free). `is_open=True` is valid only on org types —
+  enforced in `ensure_type` (ValueError) and the admin API (422).
+- **Org types live wholly at org level.** The platform-held rows are a starter
+  template: never served to org reads (an unseeded org sees an empty list, and
+  a template-only code answers 404), managed from platform scope, and copied
+  per org by the new exported **`seed_org_lookups(session, org_id)`** — called
+  by the host at org creation, presence-idempotent per (type, code) so
+  backfilling existing orgs is one call. **Required upgrade step**: a host
+  whose database already has organizations MUST run it once per existing org
+  after `migrate()` — the migration converts legacy open types to org scope
+  but cannot enumerate the host's orgs, and until seeded those orgs read
+  empty lists for every org-scoped type. Hierarchy parent pointers and
+  supersede links are remapped to the org's own rows — fresh copies or values
+  the org already had. A seed that creates rows bumps the type `version` so read-API ETags
+  invalidate. Template drift is accepted by design; platform types keep
+  automatic propagation.
+- `LookupTypeCreate`/`LookupTypeRead` carry `scope` (typed as `TypeScope`,
+  so an unknown scope is a schema-level 422); `TypeScope` is exported.
+- `ensure_type` raises when a re-registration's explicit `scope` disagrees
+  with the stored one — changing a type's scope moves ownership of every
+  value, which is a data migration, never a silent side effect. Omitting
+  `scope` keeps trusting the stored value.
 
 ## 0.12.1 — 2026-08-27
 
