@@ -1,6 +1,6 @@
 # Changelog — `asas-lookups`
 
-Versions follow semver, and the git tag matches this file: `asas-lookups/v0.11.0`.
+Versions follow semver, and the git tag matches this file: `asas-lookups/v0.12.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
