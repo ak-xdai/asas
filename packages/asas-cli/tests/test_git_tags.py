@@ -3,6 +3,7 @@ import subprocess
 import pytest
 
 from asas_cli.git_tags import FALLBACK_TAGS, latest_tag, latest_tags
+from asas_cli.registry import PACKAGES
 
 _LS_REMOTE_OUTPUT = (
     "abc123\trefs/tags/asas-lookups/v0.10.0\n"
@@ -80,6 +81,7 @@ def test_latest_tags_empty_input_returns_empty(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _run)
     assert latest_tags([]) == {}
+    assert calls == []  # nothing to resolve — no remote round trip either
 
 
 def test_latest_tag_single_package_convenience_form(monkeypatch):
@@ -88,11 +90,10 @@ def test_latest_tag_single_package_convenience_form(monkeypatch):
 
 
 def test_every_installable_package_has_a_fallback():
-    installable = {
-        "asas-lookups", "asas-validation", "asas-storage", "asas-ratelimit",
-        "asas-jobs", "asas-access", "asas-workflow", "asas-notifications",
-        "asas-search", "asas-mcp",
-    }
+    # Derived from the registry, not a second hand-typed list — so a package
+    # added to _SPECS without a fallback fails here, not at a consumer's
+    # first offline install.
+    installable = {spec.dist_name for spec in PACKAGES.values()}
     assert set(FALLBACK_TAGS) == installable
 
 
