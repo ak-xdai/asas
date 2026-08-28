@@ -1,9 +1,40 @@
 # Changelog — `asas-notifications`
 
-Versions follow semver, and the git tag matches this file: `asas-notifications/v0.14.0`.
+Versions follow semver, and the git tag matches this file: `asas-notifications/v0.15.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.15.0 — 2026-08-28
+
+Re-lands the still-open parts of PR #20 (opened against 0.12.0; its emit-side
+org fixes were superseded by 0.13.0's) on top of 0.14.0.
+
+- **Feed pagination moved into SQL.** `GET /me/notifications` previously fetched
+  every matching row and sliced the page in Python; it now pages via the new
+  `service.list_feed()` (`COUNT` + `LIMIT`/`OFFSET`; also callable directly by
+  host jobs). `unread_count()` likewise counts in SQL. Response shape is
+  unchanged; `total` and the page are separate statements, so a concurrent
+  commit can transiently skew them by a row — the standard trade for SQL
+  pagination.
+- **Org scoping as defense in depth on the read paths.** 0.13.0 fixed the emit
+  side; now, when the configured context resolver supplies an org, every
+  feed/read/archive query and per-row ownership check constrains `org_id` in
+  addition to `user_id` (a cross-org id probe 404s exactly like a missing row);
+  all sites share one `_recipient_conditions` chokepoint. Resolvers are
+  consulted on read paths too and must return `None` cheaply outside a request.
+  Hosts without a resolver keep user-only scoping; host-level tenancy remains
+  the first line.
+- **`mark_all_read()` / `archive_read()`** each issue one bulk `UPDATE` instead
+  of loading every row and flushing per-row updates.
+- **Composite indexes for the hot scans** (migration `0003`):
+  `(user_id, archived_at, created_at, id)` for the feed (id as the ORDER BY
+  tiebreaker), `(user_id, read_at, archived_at)` for the badge,
+  `(status, claimed_at)` for the dispatcher; the single-column `user_id` and
+  `status` indexes they subsume are dropped. Every create/drop is guarded by an
+  existence check (adopting hosts may have differently-named historical
+  indexes), and on Postgres the builds run `CONCURRENTLY` so a boot-time
+  `migrate()` never blocks writes to a live table.
 
 ## 0.14.0 — 2026-08-27
 

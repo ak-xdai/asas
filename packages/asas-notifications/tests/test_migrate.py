@@ -107,3 +107,46 @@ def test_rejects_a_partial_baseline_schema(engine):
     message = str(excinfo.value)
     assert 'notification_delivery' in message
     assert not sa.inspect(engine).has_table(VERSION_TABLE)
+
+
+def test_upgrade_tolerates_missing_baseline_index_names(engine):
+    """An adopting host was stamped, never having run 0001 — its historical
+    chain may have named (or omitted) the baseline's indexes differently. 0003
+    drops the subsumed single-column indexes only if they exist under the
+    baseline names, so their absence must not wedge the boot migration."""
+    command.upgrade(_config(engine), "0002")
+    with engine.begin() as conn:
+        conn.execute(sa.text("DROP INDEX ix_notification_user_id"))
+        conn.execute(sa.text("DROP INDEX ix_notification_delivery_status"))
+
+    asas_notifications.migrate(engine)  # must not raise
+
+    names = {ix["name"] for ix in sa.inspect(engine).get_indexes("notification")}
+    assert "ix_notification_user_archived_created" in names
+    assert "ix_notification_user_read_archived" in names
+    assert "ix_notification_user_id" not in names
+
+
+def test_migration_0003_is_retry_safe(engine):
+    """A partially-applied 0003 (e.g. an interrupted run on an engine without
+    transactional DDL) must be retryable: creates skip indexes that already
+    exist, drops skip ones already gone."""
+    command.upgrade(_config(engine), "0002")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "CREATE INDEX ix_notification_user_read_archived "
+                "ON notification (user_id, read_at, archived_at)"
+            )
+        )
+
+    asas_notifications.migrate(engine)  # must not raise on the existing index
+
+    names = {ix["name"] for ix in sa.inspect(engine).get_indexes("notification")}
+    assert "ix_notification_user_archived_created" in names
+    assert "ix_notification_user_id" not in names
+    delivery = {
+        ix["name"] for ix in sa.inspect(engine).get_indexes("notification_delivery")
+    }
+    assert "ix_notification_delivery_status_claimed" in delivery
+    assert "ix_notification_delivery_status" not in delivery
