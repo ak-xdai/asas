@@ -165,7 +165,9 @@ def test_migration_0003_rebuilds_an_invalid_concurrent_index(engine):
 
     The invalid state is simulated by flipping the catalog flag directly (the
     documented shape of an interrupted concurrent build), since a real
-    interruption cannot be produced deterministically in a test."""
+    interruption cannot be produced deterministically in a test. Writing
+    pg_catalog needs a superuser role — CI's service user is one — so a run
+    against an unprivileged TEST_DATABASE_URL skips rather than errors."""
     command.upgrade(_config(engine), "0002")
     with engine.begin() as conn:
         conn.execute(
@@ -174,12 +176,16 @@ def test_migration_0003_rebuilds_an_invalid_concurrent_index(engine):
                 "ON notification (user_id, org_id, archived_at, created_at, id)"
             )
         )
-        conn.execute(
-            sa.text(
-                "UPDATE pg_catalog.pg_index SET indisvalid = false "
-                "WHERE indexrelid = 'ix_notification_user_org_archived_created'::regclass"
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "UPDATE pg_catalog.pg_index SET indisvalid = false "
+                    "WHERE indexrelid = 'ix_notification_user_org_archived_created'::regclass"
+                )
             )
-        )
+    except sa.exc.ProgrammingError:
+        pytest.skip("simulating an INVALID index needs a superuser role")
 
     asas_notifications.migrate(engine)  # must drop + rebuild, not skip
 
