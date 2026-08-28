@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from sqlalchemy import and_ as sa_and
+from sqlalchemy import func as sa_func
 from sqlalchemy import or_ as sa_or
 from sqlalchemy import select as sa_select
 from sqlalchemy import update as sa_update
@@ -83,6 +84,10 @@ _recipient_filter: Optional[
 def configure_context_resolver(
     fn: Optional[Callable[[Session], Optional[tuple[int, int]]]]
 ) -> None:
+    """The resolver is consulted on read paths too (feed, counts, ownership
+    checks), not only at emit — it must return ``None`` cheaply outside a
+    request rather than raise, per its type: ``(session) -> (user_id, org_id)
+    or None``."""
     global _context_resolver
     _context_resolver = fn
 
@@ -112,6 +117,28 @@ def configure_recipient_filter(
 def current_user_id(session: Session) -> Optional[int]:
     ctx = _context_resolver(session) if _context_resolver else None
     return ctx[0] if ctx else None
+
+
+def current_org_id(session: Session) -> Optional[int]:
+    """The request's org, when a context resolver is configured and inside a
+    request. Feed/read/archive queries constrain on it *in addition to*
+    ``user_id`` — defense in depth for multi-tenant hosts: host-level tenancy
+    listeners remain the first line, this is the second. Outside a request (or
+    with no resolver) it is None and no org constraint applies — single-tenant
+    behavior is unchanged."""
+    ctx = _context_resolver(session) if _context_resolver else None
+    return ctx[1] if ctx else None
+
+
+def _recipient_conditions(session: Session, user_id: int) -> list:
+    """THE tenancy chokepoint: every recipient-facing query builds its WHERE
+    from this list, so the org guard cannot be forgotten at one site. Keep new
+    feed/count/bulk queries on it."""
+    conditions = [Notification.user_id == user_id]
+    org_id = current_org_id(session)
+    if org_id is not None:
+        conditions.append(Notification.org_id == org_id)
+    return conditions
 
 
 # ── routing policy ────────────────────────────────────────────────────────────
@@ -323,20 +350,79 @@ def notify(
 
 def unread_count(session: Session, user_id: int) -> int:
     """Unread rows still in the inbox. Archived rows are excluded — they have left
-    the recipient's list, so counting them would leave a badge pointing at nothing."""
-    rows = session.exec(
-        select(Notification.id).where(
-            Notification.user_id == user_id,
+    the recipient's list, so counting them would leave a badge pointing at nothing.
+
+    Counted in SQL (it used to fetch every id and ``len()`` them) and org-scoped
+    when a request context is available."""
+    return session.exec(
+        select(sa_func.count())
+        .select_from(Notification)
+        .where(
+            *_recipient_conditions(session, user_id),
             Notification.read_at.is_(None),
             Notification.archived_at.is_(None),
         )
+    ).one()
+
+
+def list_feed(
+    session: Session,
+    user_id: int,
+    *,
+    state: str = "open",
+    unread_only: bool = False,
+    category: Optional[Category] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[Notification], int]:
+    """One page of the recipient's feed plus the filtered total, paged in SQL.
+
+    The single feed query in the package — the router stays thin (the
+    asas-lookups service/router split), and a host digest job can call this
+    directly. ``total`` (COUNT) and the page SELECT are two statements with no
+    shared snapshot: a commit landing between them can skew total against the
+    page by a row — the standard COUNT + LIMIT/OFFSET trade, transient and
+    self-healing on the next poll."""
+    conditions = _recipient_conditions(session, user_id)
+    if state == "open":
+        conditions.append(Notification.archived_at.is_(None))
+    elif state == "archived":
+        conditions.append(Notification.archived_at.is_not(None))
+    if unread_only:
+        conditions.append(Notification.read_at.is_(None))
+    if category is not None:
+        conditions.append(Notification.category == category)
+    total = session.exec(
+        select(sa_func.count()).select_from(Notification).where(*conditions)
+    ).one()
+    rows = session.exec(
+        select(Notification)
+        .where(*conditions)
+        .order_by(Notification.created_at.desc(), Notification.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
-    return len(rows)
+    return list(rows), total
+
+
+def _owned(session: Session, user_id: int, notification_id: int) -> Optional[Notification]:
+    """The row, iff it belongs to this recipient — and, when a request context
+    supplies an org, to this org. A cross-org id probe answers exactly like a
+    missing row (404 at the router), never confirming the row exists."""
+    n = session.get(Notification, notification_id)
+    if n is None or n.user_id != user_id:
+        return None
+    org_id = current_org_id(session)
+    if org_id is not None and n.org_id != org_id:
+        return None
+    return n
 
 
 def mark_read(session: Session, user_id: int, notification_id: int) -> Optional[Notification]:
-    n = session.get(Notification, notification_id)
-    if n is None or n.user_id != user_id:
+    """Mark one owned row read (idempotent); None when :func:`_owned` says the
+    row is not this recipient's — or, under an org context, not this org's."""
+    n = _owned(session, user_id, notification_id)
+    if n is None:
         return None
     if n.read_at is None:
         n.read_at = datetime.utcnow()
@@ -349,17 +435,14 @@ def mark_read(session: Session, user_id: int, notification_id: int) -> Optional[
 def mark_all_read(session: Session, user_id: int) -> int:
     """Every unread row, archived ones included — a superset of what
     :func:`unread_count` counts, so this can never leave the badge non-zero."""
-    rows = session.exec(
-        select(Notification).where(
-            Notification.user_id == user_id, Notification.read_at.is_(None)
-        )
-    ).all()
-    now = datetime.utcnow()
-    for n in rows:
-        n.read_at = now
-        session.add(n)
+    result = session.execute(
+        sa_update(Notification)
+        .where(*_recipient_conditions(session, user_id))
+        .where(Notification.read_at.is_(None))
+        .values(read_at=datetime.utcnow())
+    )
     session.commit()
-    return len(rows)
+    return result.rowcount
 
 
 # ── archive state ────────────────────────────────────────────────────────────
@@ -379,8 +462,8 @@ def archive(session: Session, user_id: int, notification_id: int) -> Optional[No
     race sends a duplicate email, while losing this one moves a timestamp by
     milliseconds on a row that ends archived either way.
     """
-    n = session.get(Notification, notification_id)
-    if n is None or n.user_id != user_id:
+    n = _owned(session, user_id, notification_id)
+    if n is None:
         return None
     if n.archived_at is None:
         n.archived_at = datetime.utcnow()
@@ -393,8 +476,8 @@ def archive(session: Session, user_id: int, notification_id: int) -> Optional[No
 def unarchive(session: Session, user_id: int, notification_id: int) -> Optional[Notification]:
     """Back into the inbox. Read state is untouched — the two axes are independent,
     so restoring a row does not make it unread again."""
-    n = session.get(Notification, notification_id)
-    if n is None or n.user_id != user_id:
+    n = _owned(session, user_id, notification_id)
+    if n is None:
         return None
     if n.archived_at is not None:
         n.archived_at = None
@@ -408,19 +491,15 @@ def archive_read(session: Session, user_id: int) -> int:
     """Bulk "clear what I've dealt with": archives the recipient's read rows and
     leaves unread ones alone. Never archives unread rows — that would hide
     something the recipient has not seen."""
-    rows = session.exec(
-        select(Notification).where(
-            Notification.user_id == user_id,
-            Notification.read_at.is_not(None),
-            Notification.archived_at.is_(None),
-        )
-    ).all()
-    now = datetime.utcnow()
-    for n in rows:
-        n.archived_at = now
-        session.add(n)
+    result = session.execute(
+        sa_update(Notification)
+        .where(*_recipient_conditions(session, user_id))
+        .where(Notification.read_at.is_not(None))
+        .where(Notification.archived_at.is_(None))
+        .values(archived_at=datetime.utcnow())
+    )
     session.commit()
-    return len(rows)
+    return result.rowcount
 
 
 # ── dispatcher (after-commit + sweep) ────────────────────────────────────────

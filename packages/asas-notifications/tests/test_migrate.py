@@ -1,5 +1,7 @@
 """The migrate(engine) contract: fresh-create, adopt-by-stamp, idempotence."""
 
+import os
+
 import pytest
 import sqlalchemy as sa
 from alembic import command
@@ -107,3 +109,96 @@ def test_rejects_a_partial_baseline_schema(engine):
     message = str(excinfo.value)
     assert 'notification_delivery' in message
     assert not sa.inspect(engine).has_table(VERSION_TABLE)
+
+
+def test_upgrade_tolerates_missing_baseline_index_names(engine):
+    """An adopting host was stamped, never having run 0001 — its historical
+    chain may have named (or omitted) the baseline's indexes differently. 0003
+    drops the subsumed single-column indexes only if they exist under the
+    baseline names, so their absence must not wedge the boot migration."""
+    command.upgrade(_config(engine), "0002")
+    with engine.begin() as conn:
+        conn.execute(sa.text("DROP INDEX ix_notification_user_id"))
+        conn.execute(sa.text("DROP INDEX ix_notification_delivery_status"))
+
+    asas_notifications.migrate(engine)  # must not raise
+
+    names = {ix["name"] for ix in sa.inspect(engine).get_indexes("notification")}
+    assert "ix_notification_user_org_archived_created" in names
+    assert "ix_notification_user_org_read_archived" in names
+    assert "ix_notification_user_id" not in names
+
+
+def test_migration_0003_is_retry_safe(engine):
+    """A partially-applied 0003 (e.g. an interrupted run on an engine without
+    transactional DDL) must be retryable: creates skip indexes that already
+    exist, drops skip ones already gone."""
+    command.upgrade(_config(engine), "0002")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "CREATE INDEX ix_notification_user_org_read_archived "
+                "ON notification (user_id, org_id, read_at, archived_at)"
+            )
+        )
+
+    asas_notifications.migrate(engine)  # must not raise on the existing index
+
+    names = {ix["name"] for ix in sa.inspect(engine).get_indexes("notification")}
+    assert "ix_notification_user_org_archived_created" in names
+    assert "ix_notification_user_id" not in names
+    delivery = {
+        ix["name"] for ix in sa.inspect(engine).get_indexes("notification_delivery")
+    }
+    assert "ix_notification_delivery_status_claimed" in delivery
+    assert "ix_notification_delivery_status" not in delivery
+
+
+@pytest.mark.skipif(
+    not os.environ.get("TEST_DATABASE_URL"),
+    reason="pg_index.indisvalid is a Postgres catalog state",
+)
+def test_migration_0003_rebuilds_an_invalid_concurrent_index(engine):
+    """An interrupted CREATE INDEX CONCURRENTLY leaves an INVALID index that
+    the inspector reports like any other — the existence guard must not skip
+    it. 0003 checks pg_index.indisvalid and drops + rebuilds such an index.
+
+    The invalid state is produced the way production produces it — a
+    concurrent build failing mid-flight — via a deliberately impossible
+    UNIQUE build over duplicate rows under the migration's index name, run in
+    autocommit (CONCURRENTLY refuses a transaction block). No pg_catalog
+    write, so any role that owns the test schema can run this."""
+    command.upgrade(_config(engine), "0002")
+    with engine.begin() as conn:
+        for _ in range(2):
+            conn.execute(
+                sa.text(
+                    "INSERT INTO notification "
+                    "(org_id, user_id, kind, category, urgency, reason, title, "
+                    " read_at, archived_at, created_at) "
+                    "VALUES (1, 1, 'k', 'info', 'low', 'watching', 't', "
+                    " '2026-01-01', '2026-01-01', '2026-01-01')"
+                )
+            )
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        with pytest.raises(sa.exc.IntegrityError):
+            conn.execute(
+                sa.text(
+                    "CREATE UNIQUE INDEX CONCURRENTLY "
+                    "ix_notification_user_org_read_archived "
+                    "ON notification (user_id, org_id, read_at, archived_at)"
+                )
+            )
+    validity = sa.text(
+        "SELECT i.indisvalid, i.indisunique FROM pg_catalog.pg_index i "
+        "WHERE i.indexrelid = 'ix_notification_user_org_read_archived'::regclass"
+    )
+    with engine.connect() as conn:
+        assert conn.execute(validity).one().indisvalid is False  # the trap is set
+
+    asas_notifications.migrate(engine)  # must drop + rebuild, not skip
+
+    with engine.connect() as conn:
+        row = conn.execute(validity).one()
+    assert row.indisvalid is True
+    assert row.indisunique is False  # the migration's definition, not the leftover
