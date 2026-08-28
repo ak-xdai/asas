@@ -419,6 +419,8 @@ def _owned(session: Session, user_id: int, notification_id: int) -> Optional[Not
 
 
 def mark_read(session: Session, user_id: int, notification_id: int) -> Optional[Notification]:
+    """Mark one owned row read (idempotent); None when :func:`_owned` says the
+    row is not this recipient's — or, under an org context, not this org's."""
     n = _owned(session, user_id, notification_id)
     if n is None:
         return None

@@ -28,13 +28,17 @@ org fixes were superseded by 0.13.0's) on top of 0.14.0.
 - **`mark_all_read()` / `archive_read()`** each issue one bulk `UPDATE` instead
   of loading every row and flushing per-row updates.
 - **Composite indexes for the hot scans** (migration `0003`):
-  `(user_id, archived_at, created_at, id)` for the feed (id as the ORDER BY
-  tiebreaker), `(user_id, read_at, archived_at)` for the badge,
+  `(user_id, org_id, archived_at, created_at, id)` for the feed (id as the
+  ORDER BY tiebreaker), `(user_id, org_id, read_at, archived_at)` for the
+  badge — `org_id` second so the org-scoped queries filter on the index while
+  unscoped single-tenant queries still use the `user_id` prefix — and
   `(status, claimed_at)` for the dispatcher; the single-column `user_id` and
   `status` indexes they subsume are dropped. Every create/drop is guarded by an
   existence check (adopting hosts may have differently-named historical
   indexes), and on Postgres the builds run `CONCURRENTLY` so a boot-time
-  `migrate()` never blocks writes to a live table.
+  `migrate()` never blocks writes to a live table; a name-matching INVALID
+  index left by an interrupted concurrent build is detected via
+  `pg_index.indisvalid` and dropped + rebuilt rather than silently kept.
 
 ## 0.14.0 — 2026-08-27
 

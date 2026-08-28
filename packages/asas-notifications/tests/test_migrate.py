@@ -1,5 +1,7 @@
 """The migrate(engine) contract: fresh-create, adopt-by-stamp, idempotence."""
 
+import os
+
 import pytest
 import sqlalchemy as sa
 from alembic import command
@@ -122,8 +124,8 @@ def test_upgrade_tolerates_missing_baseline_index_names(engine):
     asas_notifications.migrate(engine)  # must not raise
 
     names = {ix["name"] for ix in sa.inspect(engine).get_indexes("notification")}
-    assert "ix_notification_user_archived_created" in names
-    assert "ix_notification_user_read_archived" in names
+    assert "ix_notification_user_org_archived_created" in names
+    assert "ix_notification_user_org_read_archived" in names
     assert "ix_notification_user_id" not in names
 
 
@@ -135,18 +137,57 @@ def test_migration_0003_is_retry_safe(engine):
     with engine.begin() as conn:
         conn.execute(
             sa.text(
-                "CREATE INDEX ix_notification_user_read_archived "
-                "ON notification (user_id, read_at, archived_at)"
+                "CREATE INDEX ix_notification_user_org_read_archived "
+                "ON notification (user_id, org_id, read_at, archived_at)"
             )
         )
 
     asas_notifications.migrate(engine)  # must not raise on the existing index
 
     names = {ix["name"] for ix in sa.inspect(engine).get_indexes("notification")}
-    assert "ix_notification_user_archived_created" in names
+    assert "ix_notification_user_org_archived_created" in names
     assert "ix_notification_user_id" not in names
     delivery = {
         ix["name"] for ix in sa.inspect(engine).get_indexes("notification_delivery")
     }
     assert "ix_notification_delivery_status_claimed" in delivery
     assert "ix_notification_delivery_status" not in delivery
+
+
+@pytest.mark.skipif(
+    not os.environ.get("TEST_DATABASE_URL"),
+    reason="pg_index.indisvalid is a Postgres catalog state",
+)
+def test_migration_0003_rebuilds_an_invalid_concurrent_index(engine):
+    """An interrupted CREATE INDEX CONCURRENTLY leaves an INVALID index that
+    the inspector reports like any other — the existence guard must not skip
+    it. 0003 checks pg_index.indisvalid and drops + rebuilds such an index.
+
+    The invalid state is simulated by flipping the catalog flag directly (the
+    documented shape of an interrupted concurrent build), since a real
+    interruption cannot be produced deterministically in a test."""
+    command.upgrade(_config(engine), "0002")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "CREATE INDEX ix_notification_user_org_archived_created "
+                "ON notification (user_id, org_id, archived_at, created_at, id)"
+            )
+        )
+        conn.execute(
+            sa.text(
+                "UPDATE pg_catalog.pg_index SET indisvalid = false "
+                "WHERE indexrelid = 'ix_notification_user_org_archived_created'::regclass"
+            )
+        )
+
+    asas_notifications.migrate(engine)  # must drop + rebuild, not skip
+
+    with engine.connect() as conn:
+        valid = conn.execute(
+            sa.text(
+                "SELECT i.indisvalid FROM pg_catalog.pg_index i "
+                "WHERE i.indexrelid = 'ix_notification_user_org_archived_created'::regclass"
+            )
+        ).scalar()
+    assert valid is True

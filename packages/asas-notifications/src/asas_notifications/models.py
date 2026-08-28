@@ -57,17 +57,23 @@ class DeliveryStatus(str, Enum):
 class Notification(SQLModel, table=True):
     __tablename__ = "notification"
     __table_args__ = (
-        # The feed: WHERE user_id = ? AND archived_at IS (NOT) NULL
-        # ORDER BY created_at DESC, id DESC. Subsumes the old single-column
+        # The feed: WHERE user_id = ? [AND org_id = ?] AND archived_at IS (NOT)
+        # NULL ORDER BY created_at DESC, id DESC. org_id sits second so the
+        # org-scoped queries filter on the index while unscoped single-tenant
+        # queries still use the user_id prefix. Subsumes the old single-column
         # user_id index (dropped in migration 0003). id trails as the ORDER BY
         # tiebreaker so tie-heavy batch emits still stream straight off the
         # index.
         Index(
-            "ix_notification_user_archived_created",
-            "user_id", "archived_at", "created_at", "id",
+            "ix_notification_user_org_archived_created",
+            "user_id", "org_id", "archived_at", "created_at", "id",
         ),
-        # The badge: WHERE user_id = ? AND read_at IS NULL AND archived_at IS NULL.
-        Index("ix_notification_user_read_archived", "user_id", "read_at", "archived_at"),
+        # The badge: WHERE user_id = ? [AND org_id = ?]
+        # AND read_at IS NULL AND archived_at IS NULL.
+        Index(
+            "ix_notification_user_org_read_archived",
+            "user_id", "org_id", "read_at", "archived_at",
+        ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)

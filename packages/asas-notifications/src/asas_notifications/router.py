@@ -34,6 +34,8 @@ def _require_recipient(session: Session) -> int:
 
 
 def build_router(get_session) -> APIRouter:
+    """The host-contract factory: builds the feed router over the host's
+    FastAPI session dependency. Auth is the host's, applied at include time."""
     router = APIRouter(prefix="/me/notifications", tags=["notifications"])
 
     @router.get("", response_model=NotificationList)
@@ -75,6 +77,8 @@ def build_router(get_session) -> APIRouter:
 
     @router.post("/{notification_id}/read", response_model=NotificationRead)
     def mark_read(notification_id: int, session: Session = Depends(get_session)):
+        """Mark one of the recipient's rows read. 404 for a row that is missing,
+        another user's, or — under an org context — another org's."""
         user_id = _require_recipient(session)
         n = service.mark_read(session, user_id, notification_id)
         if n is None:
@@ -83,11 +87,15 @@ def build_router(get_session) -> APIRouter:
 
     @router.post("/read-all", response_model=ReadAllResult)
     def mark_all_read(session: Session = Depends(get_session)):
+        """Mark every unread row read (archived ones included) in one bulk
+        UPDATE; returns the number of rows updated."""
         user_id = _require_recipient(session)
         return ReadAllResult(updated=service.mark_all_read(session, user_id))
 
     @router.post("/{notification_id}/archive", response_model=NotificationRead)
     def archive(notification_id: int, session: Session = Depends(get_session)):
+        """File one row out of the inbox (idempotent). Same 404 contract as
+        mark_read."""
         user_id = _require_recipient(session)
         n = service.archive(session, user_id, notification_id)
         if n is None:
@@ -96,6 +104,8 @@ def build_router(get_session) -> APIRouter:
 
     @router.post("/{notification_id}/unarchive", response_model=NotificationRead)
     def unarchive(notification_id: int, session: Session = Depends(get_session)):
+        """Restore one archived row to the inbox; read state is untouched. Same
+        404 contract as mark_read."""
         user_id = _require_recipient(session)
         n = service.unarchive(session, user_id, notification_id)
         if n is None:
@@ -104,6 +114,8 @@ def build_router(get_session) -> APIRouter:
 
     @router.post("/archive-read", response_model=ArchiveResult)
     def archive_read(session: Session = Depends(get_session)):
+        """Archive the recipient's read, still-open rows in one bulk UPDATE —
+        never unread ones; returns the number of rows updated."""
         user_id = _require_recipient(session)
         return ArchiveResult(updated=service.archive_read(session, user_id))
 
