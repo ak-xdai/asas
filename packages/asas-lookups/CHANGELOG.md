@@ -1,9 +1,19 @@
 # Changelog — `asas-lookups`
 
-Versions follow semver, and the git tag matches this file: `asas-lookups/v0.13.1`.
+Versions follow semver, and the git tag matches this file: `asas-lookups/v0.13.2`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
+
+## 0.13.2 — 2026-08-28
+
+- **The list ETag now varies with the query shape** (PR #11, re-landed). `GET
+  /lookups/{type}`'s ETag was keyed on `(type, version, lang, org)` only, so
+  page 2, `q=...`, `parent=...`, and `active=false` shared page 1's tag — a
+  conforming HTTP client that cached page 1 got `304 Not Modified` for every
+  other variant and reused the wrong body. The query shape (`active`, `q`,
+  `parent`, `page`, `page_size`) is hashed into the tag; same-request
+  revalidation still 304s, and a version bump still busts every variant.
 
 ## 0.13.1 — 2026-08-27
 
