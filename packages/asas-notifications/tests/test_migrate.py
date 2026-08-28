@@ -163,37 +163,42 @@ def test_migration_0003_rebuilds_an_invalid_concurrent_index(engine):
     the inspector reports like any other — the existence guard must not skip
     it. 0003 checks pg_index.indisvalid and drops + rebuilds such an index.
 
-    The invalid state is simulated by flipping the catalog flag directly (the
-    documented shape of an interrupted concurrent build), since a real
-    interruption cannot be produced deterministically in a test. Writing
-    pg_catalog needs a superuser role — CI's service user is one — so a run
-    against an unprivileged TEST_DATABASE_URL skips rather than errors."""
+    The invalid state is produced the way production produces it — a
+    concurrent build failing mid-flight — via a deliberately impossible
+    UNIQUE build over duplicate rows under the migration's index name, run in
+    autocommit (CONCURRENTLY refuses a transaction block). No pg_catalog
+    write, so any role that owns the test schema can run this."""
     command.upgrade(_config(engine), "0002")
     with engine.begin() as conn:
-        conn.execute(
-            sa.text(
-                "CREATE INDEX ix_notification_user_org_archived_created "
-                "ON notification (user_id, org_id, archived_at, created_at, id)"
-            )
-        )
-    try:
-        with engine.begin() as conn:
+        for _ in range(2):
             conn.execute(
                 sa.text(
-                    "UPDATE pg_catalog.pg_index SET indisvalid = false "
-                    "WHERE indexrelid = 'ix_notification_user_org_archived_created'::regclass"
+                    "INSERT INTO notification "
+                    "(org_id, user_id, kind, category, urgency, reason, title, "
+                    " read_at, archived_at, created_at) "
+                    "VALUES (1, 1, 'k', 'info', 'low', 'watching', 't', "
+                    " '2026-01-01', '2026-01-01', '2026-01-01')"
                 )
             )
-    except sa.exc.ProgrammingError:
-        pytest.skip("simulating an INVALID index needs a superuser role")
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        with pytest.raises(sa.exc.IntegrityError):
+            conn.execute(
+                sa.text(
+                    "CREATE UNIQUE INDEX CONCURRENTLY "
+                    "ix_notification_user_org_read_archived "
+                    "ON notification (user_id, org_id, read_at, archived_at)"
+                )
+            )
+    validity = sa.text(
+        "SELECT i.indisvalid, i.indisunique FROM pg_catalog.pg_index i "
+        "WHERE i.indexrelid = 'ix_notification_user_org_read_archived'::regclass"
+    )
+    with engine.connect() as conn:
+        assert conn.execute(validity).one().indisvalid is False  # the trap is set
 
     asas_notifications.migrate(engine)  # must drop + rebuild, not skip
 
     with engine.connect() as conn:
-        valid = conn.execute(
-            sa.text(
-                "SELECT i.indisvalid FROM pg_catalog.pg_index i "
-                "WHERE i.indexrelid = 'ix_notification_user_org_archived_created'::regclass"
-            )
-        ).scalar()
-    assert valid is True
+        row = conn.execute(validity).one()
+    assert row.indisvalid is True
+    assert row.indisunique is False  # the migration's definition, not the leftover
