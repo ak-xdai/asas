@@ -93,10 +93,12 @@ def build_routers(get_session: Callable) -> Routers:
         # repr() of the tuple, not a delimiter-joined string: values may contain
         # the delimiter, and (q="a.", parent="b") must never share a tag with
         # (q="a", parent=".b") — that would be this fix's own bug, one layer
-        # down. repr quotes each element, so the encoding is unambiguous.
-        shape = hashlib.sha1(
+        # down. repr quotes each element, so the encoding is unambiguous. The
+        # digest is kept whole: a truncated hash reintroduces (however
+        # improbably) the cross-shape collision the encoding just removed.
+        shape = hashlib.sha256(
             repr((active, q, parent, page, page_size)).encode()
-        ).hexdigest()[:8]
+        ).hexdigest()
         etag = f'W/"{type_.key}.v{type_.version}.{lang}.o{org or 0}.{shape}"'
         if if_none_match == etag:
             return Response(status_code=304, headers={"ETag": etag})

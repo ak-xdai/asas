@@ -197,6 +197,10 @@ def test_list_etag_varies_with_query_shape(client):
         headers={"If-None-Match": etag},
     )
     assert r4.status_code == 200
+    r5 = client.get(
+        "/lookups/gender", params={"page_size": 2}, headers={"If-None-Match": etag}
+    )
+    assert r5.status_code == 200  # page_size alone is a different representation
 
 
 def test_list_etag_shape_encoding_is_unambiguous(client):
