@@ -91,6 +91,27 @@ def test_new_command_accepts_dist_names_like_add_does(tmp_path):
     assert "import asas_lookups" in (tmp_path / "demo" / "main.py").read_text()
 
 
+def test_new_command_dedupes_repeated_package_selections(tmp_path):
+    # `lookups,asas-lookups` resolves to one package — the generated project
+    # must not carry a duplicate dependency or double wiring.
+    rc = main(["new", "demo", "--with", "lookups,asas-lookups,lookups", "--dir", str(tmp_path)])
+
+    assert rc == 0
+    doc = tomlkit.parse((tmp_path / "demo" / "pyproject.toml").read_text())
+    lookups_deps = [d for d in doc["project"]["dependencies"] if "asas-lookups" in d]
+    assert len(lookups_deps) == 1
+
+
+def test_new_command_rejects_a_file_as_dir(tmp_path, capsys):
+    target = tmp_path / "not-a-dir"
+    target.write_text("plain file")
+
+    rc = main(["new", "demo", "--with", "lookups", "--dir", str(target)])
+
+    assert rc == 1
+    assert "is not a directory" in capsys.readouterr().err
+
+
 def test_new_command_rejects_a_path_as_project_name(tmp_path, capsys):
     # The name lands in the generated `[project] name`; a path would scaffold
     # a project pip refuses to install.

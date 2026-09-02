@@ -142,9 +142,11 @@ SNIPPETS: dict[str, BootSnippet] = {
         setup=(
             "asas_notifications.configure_context_resolver(None)  "
             "# TODO: (session) -> (user_id, org_id) | None",
-            "asas_notifications.configure_recipient_filter(None)  "
-            "# TODO: (session, user_ids, entity_type, record) -> visible user_ids "
-            "— a notification must never leak a private record",
+            "# TODO: asas_notifications.configure_recipient_filter(fn) — "
+            "(session, user_ids, entity_type, record) -> visible user_ids. "
+            "Left unconfigured (not None-configured) on purpose: with no filter, "
+            "notify() skips visibility filtering, so wire this before notifying "
+            "on any private record.",
             "asas_notifications.register_kind(\n"
             '    "example.kind",\n'
             "    category=asas_notifications.Category.info,      # action | info | warning\n"

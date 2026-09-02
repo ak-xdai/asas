@@ -64,9 +64,15 @@ def _cmd_new(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        keys = [resolve(k).key for k in raw]
+        # dict.fromkeys: `lookups,asas-lookups` (or a plain repeat) resolves to
+        # one key once, not a duplicated dependency + double wiring.
+        keys = list(dict.fromkeys(resolve(k).key for k in raw))
     except KeyError as exc:
         print(f"asas new: {exc}", file=sys.stderr)
+        return 1
+
+    if args.dir is not None and Path(args.dir).exists() and not Path(args.dir).is_dir():
+        print(f"asas new: --dir {args.dir} is not a directory", file=sys.stderr)
         return 1
 
     project_dir = Path(args.dir) / args.name if args.dir else Path(args.name)
