@@ -164,3 +164,56 @@ def test_remove_alias_matches_like_add(client):
     assert (
         client.delete("/admin/lookups/widget/gear/aliases/baz").status_code == 200
     )
+
+
+def test_list_etag_varies_with_query_shape(client):
+    """An ETag names a representation: page 2 or a filtered list is a
+    different body than page 1 of the same type version, so a 304 for one
+    must not be served for the other."""
+    r1 = client.get("/lookups/gender", params={"page_size": 1})
+    etag = r1.headers["ETag"]
+    assert (
+        client.get(
+            "/lookups/gender", params={"page_size": 1}, headers={"If-None-Match": etag}
+        ).status_code
+        == 304
+    )
+    r2 = client.get(
+        "/lookups/gender",
+        params={"page_size": 1, "page": 2},
+        headers={"If-None-Match": etag},
+    )
+    assert r2.status_code == 200  # different page: full body, not 304
+    # each variant changes exactly one parameter against the cached shape
+    r3 = client.get(
+        "/lookups/gender",
+        params={"page_size": 1, "q": "zzzz"},
+        headers={"If-None-Match": etag},
+    )
+    assert r3.status_code == 200 and r3.json()["total"] == 0
+    r4 = client.get(
+        "/lookups/gender",
+        params={"page_size": 1, "active": "false"},
+        headers={"If-None-Match": etag},
+    )
+    assert r4.status_code == 200
+    r5 = client.get(
+        "/lookups/gender", params={"page_size": 2}, headers={"If-None-Match": etag}
+    )
+    assert r5.status_code == 200  # page_size alone is a different representation
+    r6 = client.get(
+        "/lookups/gender",
+        params={"page_size": 1, "parent": "nope"},
+        headers={"If-None-Match": etag},
+    )
+    assert r6.status_code == 200 and r6.json()["total"] == 0  # parent alone, too
+
+
+def test_list_etag_shape_encoding_is_unambiguous(client):
+    """The shape components are hashed as a tuple, not a delimiter-joined
+    string: (q="a.", parent="b") and (q="a", parent=".b") concatenate to the
+    same "a..b" under a "." join, and sharing a tag across them would serve
+    one filter's cached body for the other."""
+    r1 = client.get("/lookups/gender", params={"q": "a.", "parent": "b"})
+    r2 = client.get("/lookups/gender", params={"q": "a", "parent": ".b"})
+    assert r1.headers["ETag"] != r2.headers["ETag"]

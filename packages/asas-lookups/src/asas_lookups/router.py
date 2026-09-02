@@ -6,6 +6,7 @@ Auth is composition-time: the host applies its guards when including the routers
 this package never learns the host's auth model.
 """
 
+import hashlib
 from typing import Callable, NamedTuple, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
@@ -77,12 +78,28 @@ def build_routers(get_session: Callable) -> Routers:
         if_none_match: Optional[str] = Header(default=None),
         session: Session = Depends(get_session),
     ):
+        """One page of a type's values, with weak-ETag revalidation: the tag
+        names this exact representation (type version, lang, org, and the
+        query shape), so a 304 is only ever served for the same page and
+        filters, and any change to the type busts every variant at once."""
         type_ = service.get_type(session, type_key)
         # Cheap revalidation: ETag keyed on the type version (bumped on any change)
         # and the caller's org (WXL-241 — two orgs see different value sets of one
-        # type).
+        # type). The query shape must be in the tag too — an ETag is per
+        # *representation*, and page 2 or a filtered list is a different body
+        # than page 1: without this a conforming client 304-reuses page 1 for
+        # every other page/filter of the same type version.
         org = service._current_org(session)
-        etag = f'W/"{type_.key}.v{type_.version}.{lang}.o{org or 0}"'
+        # repr() of the tuple, not a delimiter-joined string: values may contain
+        # the delimiter, and (q="a.", parent="b") must never share a tag with
+        # (q="a", parent=".b") — that would be this fix's own bug, one layer
+        # down. repr quotes each element, so the encoding is unambiguous. The
+        # digest is kept whole: a truncated hash reintroduces (however
+        # improbably) the cross-shape collision the encoding just removed.
+        shape = hashlib.sha256(
+            repr((active, q, parent, page, page_size)).encode()
+        ).hexdigest()
+        etag = f'W/"{type_.key}.v{type_.version}.{lang}.o{org or 0}.{shape}"'
         if if_none_match == etag:
             return Response(status_code=304, headers={"ETag": etag})
         total, items = service.list_values(
