@@ -557,12 +557,13 @@ def notify(
                 continue
             existing.title = title
             existing.body = merge_body(existing.body, body) if merge_body else body
-            if data is not None:
-                existing.data = data  # latest data wins, like the title (DR 0003 S-3)
-            # The fold IS the latest event, so its classification and template
-            # come along with its text — a pre-0004 row (topic NULL) gets
-            # labeled on first fold, and U-4's renderer must never pair v2
-            # data with a stale v1 template.
+            # The fold IS the latest event, so its data, classification and
+            # template all come along with its text (DR 0003 S-3: latest data
+            # wins, like the title) — a pre-0004 row (topic NULL) gets labeled
+            # on first fold. Keeping a PREVIOUS fold's data (or template) while
+            # taking the new one's counterpart would hand U-4's renderer a
+            # template/data pairing no single emit ever produced.
+            existing.data = data
             existing.topic = topic
             existing.template = template
             existing.created_at = datetime.utcnow()

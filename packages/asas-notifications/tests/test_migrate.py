@@ -263,6 +263,18 @@ def test_adoption_still_accepts_the_baseline_vocabulary(engine):
     assert "action" in cols and "kind" not in cols
 
 
+def test_half_renamed_table_is_refused_before_the_stamp(engine):
+    """One pair renamed, the other not (a crashed rename, or hand edits): the
+    guard must refuse with guidance BEFORE stamping — stamping would replay the
+    chain and crash raw inside 0004 on the pair that already moved."""
+    command.upgrade(_config(engine), _BASELINE)
+    with engine.begin() as conn:
+        conn.execute(sa.text(f"DROP TABLE {VERSION_TABLE}"))
+        conn.execute(sa.text("ALTER TABLE notification RENAME COLUMN kind TO action"))
+    with pytest.raises(RuntimeError, match="PARTIALLY renamed"):
+        asas_notifications.migrate(engine)
+
+
 def test_downgrade_0004_backfills_null_actions(engine):
     """Ad hoc emits write action=NULL; the 0.15 kind column is NOT NULL, so
     the downgrade must backfill instead of dying half-reverted."""

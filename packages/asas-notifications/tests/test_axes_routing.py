@@ -88,6 +88,19 @@ def test_coalesce_keys_on_action_and_keeps_latest_data(session):
     assert other.id != first.id  # a different action never folds
 
 
+def test_coalesce_fold_keeps_template_and_data_paired(session):
+    """The fold IS the latest event: its template and data travel together.
+    Keeping a previous fold's data under the new fold's template would hand
+    U-4's renderer a pairing no single emit ever produced."""
+    kw = dict(urgency="low", entity_type="job", entity_id=8, coalesce_unread=True)
+    first = emit_axes(session, [1], "job.update", data={"v": 1}, title="v1", **kw)[0]
+    folded = emit_axes(
+        session, [1], "job.update", template="job_updated", title="v2", **kw
+    )[0]
+    assert folded.id == first.id
+    assert folded.template == "job_updated" and folded.data is None
+
+
 # ── equivalence: empty tables reproduce 0.15 routing ─────────────────────────
 
 # The Teamy reference catalog (adoption guide §6.2) mapped to axes.

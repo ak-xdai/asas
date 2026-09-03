@@ -94,9 +94,11 @@ read and to leave only when the recipient acts on it or files it away — an
 | --- | --- | --- |
 | `state` | `open` (un-archived) · `archived` · `all` | `open` |
 | `unread_only` | bool | `false` |
-| `category` | `action` · `info` · `warning` | all |
+| `nature` | `action` · `info` · `warning` | all |
 
-So `?state=open&category=action` is "still needs me", `?state=archived` is the
+(`category` is accepted as a deprecated alias for `nature` for one release.)
+
+So `?state=open&nature=action` is "still needs me", `?state=archived` is the
 history, and `?unread_only=true` is the classic feed. `total` reflects the
 filters; **`unread_count` never does** — it is unread-and-un-archived on every
 response, so a badge fed from any list call agrees with every other.

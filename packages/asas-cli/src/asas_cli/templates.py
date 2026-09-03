@@ -143,17 +143,19 @@ SNIPPETS: dict[str, BootSnippet] = {
             "asas_notifications.configure_context_resolver(None)  "
             "# TODO: (session) -> (user_id, org_id) | None",
             "# TODO: asas_notifications.configure_recipient_filter(fn) — "
-            "(session, user_ids, entity_type, record) -> visible user_ids. "
+            "(session, user_ids, entity_type, entity_id, record) -> visible user_ids. "
             "Left unconfigured (not None-configured) on purpose: with no filter, "
             "notify() skips visibility filtering, so wire this before notifying "
             "on any private record.",
-            "asas_notifications.register_kind(\n"
-            '    "example.kind",\n'
-            "    category=asas_notifications.Category.info,      # action | info | warning\n"
-            "    urgency=asas_notifications.Urgency.normal,       # low | normal | high\n"
-            "    reason=asas_notifications.Reason.participant,    "
-            "# requested | participant | watching\n"
-            ")  # TODO: your real kind catalog",
+            "# TODO: seed your topic vocabulary (~5-8 rows; an emit's topic= must "
+            'exist — migrate() seeds only "general"):\n'
+            "# with Session(engine) as s:\n"
+            '#     s.add(asas_notifications.NotificationTopic(key="jobs", name="Jobs"))\n'
+            "#     s.commit()\n"
+            "# Emits then pass the causing action plus the four axes, no registration:\n"
+            '# asas_notifications.notify(session, recipients, action="job.publish",\n'
+            '#     topic="jobs", nature="info", urgency="normal", reason="watching",\n'
+            '#     title=...)',
             'app.include_router(asas_notifications.build_router(get_session))  '
             '# already prefixed "/me/notifications"',
             "# Dispatch the outbox on your own cadence (after-commit hook / boot sweep / periodic job):",

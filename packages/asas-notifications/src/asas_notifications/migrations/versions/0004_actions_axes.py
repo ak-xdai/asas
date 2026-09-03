@@ -39,13 +39,19 @@ def _index_names(table: str) -> set:
 
 
 def _pg_index_valid(name: str) -> bool:
-    return op.get_bind().execute(
+    # Schema-qualified exactly like 0003's helper: a bare ``::regclass`` cast
+    # resolves through search_path and can read a same-named index from another
+    # schema on multi-schema hosts.
+    row = op.get_bind().execute(
         sa.text(
             "SELECT i.indisvalid FROM pg_catalog.pg_index i "
-            "WHERE i.indexrelid = :name::regclass"
+            "JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relname = :name AND n.nspname = current_schema()"
         ),
         {"name": name},
     ).scalar()
+    return True if row is None else bool(row)
 
 
 def _create_live(table: str, name: str, columns: list) -> None:

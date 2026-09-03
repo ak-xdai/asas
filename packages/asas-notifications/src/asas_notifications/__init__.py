@@ -1,12 +1,16 @@
 """Asas notifications — generic notification engine with a per-channel outbox.
 
 Extracted from Teamy (epic WXL-209/WXL-222; extraction epic TEAMY-466, design
-record 0017). The package never imports host models. Producers register event
-kinds and emit through :func:`notify` inside their own transaction (the insert
-IS the enqueue); the in-app feed is the ``notification`` row itself; every other
-channel goes through the ``notification_delivery`` outbox and a registered
-channel adapter. Dispatch is duplicate-safe under concurrent passes (per-row CAS
-claims with stale-claim reclaim) and at-least-once overall.
+record 0017; reshaped by DR 0003). The package never imports host models.
+Producers emit through :func:`notify` inside their own transaction (the insert
+IS the enqueue), passing the application ``action`` that caused the event — a
+reference, declared nowhere — plus four classification axes
+(``topic``/``nature``/``urgency``/``reason``); routing attaches to the axes via
+the policy tables, never to individual actions. The in-app feed is the
+``notification`` row itself; every other channel goes through the
+``notification_delivery`` outbox and a registered channel adapter. Dispatch is
+duplicate-safe under concurrent passes (per-row CAS claims with stale-claim
+reclaim) and at-least-once overall.
 
 Host contract (table-owning + router variant):
 
@@ -16,10 +20,12 @@ Host contract (table-owning + router variant):
 - :func:`configure_context_resolver` / :func:`configure_recipient_filter` — the
   host supplies "who is the current (user, org)" and "which recipients may see
   this record" (a notification must never leak a private record).
-- :func:`register_kind` / :func:`register_adapter` — the kind catalog and
-  channel adapters (email, chat, …) are the host's.
+- seeded :class:`NotificationTopic` rows + :func:`register_adapter` — the topic
+  vocabulary and channel adapters (email, chat, …) are the host's.
 - :func:`dispatch_pending` — one outbox pass; the host owns the cadences
   (after-commit hook, boot sweep, periodic job).
+- :func:`register_kind` — **deprecated shim** (one release): maps a registered
+  kind's defaults onto the axes for legacy ``notify(kind=...)`` emits.
 """
 
 from . import service
