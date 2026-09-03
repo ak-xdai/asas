@@ -48,13 +48,22 @@ _SENTINEL_COLUMNS = frozenset({
     "resolved_at",
     "created_at",
 })
-# Migration 0004 renames two baseline columns in place, so the sentinel's
-# identity check accepts either vocabulary: (kind, category) at the baseline
-# shape, (action, nature) after 0004. A table carrying NEITHER pair is
-# somebody else's; a table carrying the POST-rename pair with no version table
-# is our own schema that lost its bookkeeping — a different problem with a
-# different remedy, and stamping the baseline over it would wreck it.
-_RENAMED_PAIRS = (("kind", "action"), ("category", "nature"))
+
+
+# Columns this package's own migrations RENAME in place, as (old, new).
+#
+# The sentinel's identity check has to accept either vocabulary: the baseline
+# name before that migration, the new name after it. A table carrying NEITHER
+# name of a pair is somebody else's; a table carrying every POST-rename name
+# with no version table is our own schema that has lost its bookkeeping, which
+# is a different problem with a different remedy, and stamping the baseline
+# over it would wreck it.
+#
+# Empty for a package whose baseline column names have never moved.
+_RENAMED_PAIRS: tuple[tuple[str, str], ...] = (
+    ("kind", "action"),
+    ("category", "nature"),
+)
 
 
 def _config(engine: Engine) -> Config:
@@ -90,17 +99,22 @@ def _assert_adoptable(inspector) -> None:
             f"and retry."
         )
     actual = {c["name"] for c in inspector.get_columns(_SENTINEL_TABLE)}
-    if all(new in actual and old not in actual for old, new in _RENAMED_PAIRS):
-        # The 0.16 shape (post-0004 renames) with no version table: this is
-        # the package's OWN table whose migration bookkeeping went missing
-        # (partial restore, or an adopting host that tracked our chain in its
-        # own). Stamping the baseline would replay 0002+ over it and fail —
-        # never advise renaming real notification data away.
+    # `_RENAMED_PAIRS and ...` is load-bearing: `all()` over an empty sequence
+    # is True, so without it every package that renames nothing would refuse
+    # each and every adopt with the error below.
+    if _RENAMED_PAIRS and all(
+        new in actual and old not in actual for old, new in _RENAMED_PAIRS
+    ):
+        # The post-rename shape with no version table: this is the package's OWN
+        # table whose migration bookkeeping went missing (a partial restore, or
+        # an adopting host that tracked our chain in its own). Stamping the
+        # baseline would replay the chain over it and fail, and the remedy is
+        # never to rename or drop a table that holds real data.
         raise RuntimeError(
-            f"asas-notifications found its own post-0004 {_SENTINEL_TABLE!r} schema but no "
+            f"asas-notifications found its own post-rename {_SENTINEL_TABLE!r} schema but no "
             f"{VERSION_TABLE!r} table. Restore the version table, or stamp the "
-            f"chain at its true revision (alembic stamp 0004) — do NOT rename "
-            f"or drop the table; it holds real notification data."
+            f"chain at its true revision, and do NOT rename or drop the table: "
+            f"it holds real data."
         )
     missing = sorted(
         (_SENTINEL_COLUMNS - actual)
