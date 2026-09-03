@@ -37,8 +37,6 @@ _SENTINEL_COLUMNS = frozenset({
     "id",
     "org_id",
     "user_id",
-    "kind",
-    "category",
     "urgency",
     "reason",
     "entity_type",
@@ -50,6 +48,13 @@ _SENTINEL_COLUMNS = frozenset({
     "resolved_at",
     "created_at",
 })
+# Migration 0004 renames two baseline columns in place, so the sentinel's
+# identity check accepts either vocabulary: (kind, category) at the baseline
+# shape, (action, nature) after 0004. A table carrying NEITHER pair is
+# somebody else's; a table carrying the POST-rename pair with no version table
+# is our own schema that lost its bookkeeping — a different problem with a
+# different remedy, and stamping the baseline over it would wreck it.
+_RENAMED_PAIRS = (("kind", "action"), ("category", "nature"))
 
 
 def _config(engine: Engine) -> Config:
@@ -85,11 +90,26 @@ def _assert_adoptable(inspector) -> None:
             f"and retry."
         )
     actual = {c["name"] for c in inspector.get_columns(_SENTINEL_TABLE)}
-    missing = _SENTINEL_COLUMNS - actual
+    if all(new in actual and old not in actual for old, new in _RENAMED_PAIRS):
+        # The 0.16 shape (post-0004 renames) with no version table: this is
+        # the package's OWN table whose migration bookkeeping went missing
+        # (partial restore, or an adopting host that tracked our chain in its
+        # own). Stamping the baseline would replay 0002+ over it and fail —
+        # never advise renaming real notification data away.
+        raise RuntimeError(
+            f"asas-notifications found its own post-0004 {_SENTINEL_TABLE!r} schema but no "
+            f"{VERSION_TABLE!r} table. Restore the version table, or stamp the "
+            f"chain at its true revision (alembic stamp 0004) — do NOT rename "
+            f"or drop the table; it holds real notification data."
+        )
+    missing = sorted(
+        (_SENTINEL_COLUMNS - actual)
+        | {old for old, new in _RENAMED_PAIRS if old not in actual and new not in actual}
+    )
     if missing:
         raise RuntimeError(
             f"asas-notifications cannot adopt the existing {_SENTINEL_TABLE!r} table: it is "
-            f"missing the baseline columns {sorted(missing)}. This database already "
+            f"missing the baseline columns {missing}. This database already "
             f"contains an unrelated table named {_SENTINEL_TABLE!r}, so asas-notifications "
             f"cannot use that name. Rename the existing table and retry."
         )

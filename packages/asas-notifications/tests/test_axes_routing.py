@@ -261,3 +261,65 @@ def test_feed_filters_on_nature_with_category_alias(migrated, session):
     item = client.get("/me/notifications?nature=action").json()["items"][0]
     assert item["action"] == "job.publish" and item["nature"] == "action"
     assert "kind" not in item and "category" not in item
+
+
+# ── review fixes (PR #43) ────────────────────────────────────────────────────
+
+
+def test_unknown_topic_fails_loud_inside_suppression(session):
+    """Suppression silences delivery, never catalog mistakes — the 0.15
+    unregistered-kind guarantee, carried to the topic reference."""
+    with notifications.suppressed():
+        with pytest.raises(LookupError, match="topic"):
+            emit_axes(session, [1], "job.publish", topic="aprovals")
+
+
+def test_registered_kind_with_partial_axes_fails_loud(session):
+    """The shim covers only fully-legacy calls: a site that states even one
+    axis has been converted and gets the new contract, not silent backfill."""
+    with pytest.warns(DeprecationWarning):
+        notifications.register_kind(
+            "job.publish", category="action", urgency="normal", reason="participant"
+        )
+    with pytest.raises(TypeError, match="axis"):
+        notifications.notify(session, [1], "job.publish", nature="info", title="x")
+
+
+def test_policy_tie_break_prefers_the_newest_row(session):
+    add_topic(session, "billing")
+    add_policy(session, "email", topic="billing", enabled=False)
+    add_policy(session, "email", topic="billing", enabled=True)  # admin's newer row
+    n = emit_axes(session, [1], "invoice.send", topic="billing")[0]
+    assert deliveries(session, n.id) == ["email"]
+
+
+def test_coalesce_fold_refreshes_topic_and_template(session):
+    kw = dict(urgency="low", entity_type="job", entity_id=3, coalesce_unread=True)
+    first = emit_axes(session, [1], "job.update", template="v1", title="t1", **kw)[0]
+    # simulate a pre-0004 row: topic never labeled
+    first.topic = None
+    session.add(first)
+    session.commit()
+    folded = emit_axes(session, [1], "job.update", template="v2", title="t2", **kw)[0]
+    assert folded.id == first.id
+    assert folded.topic == "general" and folded.template == "v2"
+
+
+def test_list_feed_category_alias_warns_and_filters(session):
+    emit_axes(session, [1], "job.publish", nature="action", urgency="low")
+    emit_axes(session, [1], "job.update", nature="info", urgency="low")
+    with pytest.warns(DeprecationWarning, match="nature"):
+        rows, total = service.list_feed(
+            session, 1, category=notifications.Nature.action
+        )
+    assert total == 1 and rows[0].nature == "action"
+
+
+def test_topic_seeded_within_ttl_is_found_by_fresh_requery(session):
+    """A topic seeded on another replica inside the TTL window costs one extra
+    SELECT — never a transaction-aborting false LookupError."""
+    emit_axes(session, [1], "job.publish")  # warms the topic cache
+    session.add(NotificationTopic(key="late", name="Late"))
+    session.commit()  # deliberately NO config_cache_clear()
+    n = emit_axes(session, [1], "job.publish", topic="late")[0]
+    assert n.topic == "late"

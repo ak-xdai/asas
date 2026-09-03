@@ -240,3 +240,41 @@ def test_migration_0004_renames_in_place_and_seeds_general(engine):
         ).one()
         assert seeded.org_id is None  # a platform row
     assert inspector.has_table("notification_channel_policy")
+
+
+def test_own_post_rename_schema_without_version_table_gets_honest_error(engine):
+    """After 0004 the sentinel columns are action/nature. Losing only the
+    version table must NOT be misdiagnosed as an unrelated table (whose
+    remedy — rename it away — would destroy real notification data)."""
+    asas_notifications.migrate(engine)
+    with engine.begin() as conn:
+        conn.execute(sa.text(f"DROP TABLE {VERSION_TABLE}"))
+    with pytest.raises(RuntimeError, match="version table|stamp"):
+        asas_notifications.migrate(engine)
+
+
+def test_adoption_still_accepts_the_baseline_vocabulary(engine):
+    """The pre-rename shape (kind/category) is still the adoptable baseline."""
+    command.upgrade(_config(engine), _BASELINE)
+    with engine.begin() as conn:
+        conn.execute(sa.text(f"DROP TABLE {VERSION_TABLE}"))
+    asas_notifications.migrate(engine)  # must adopt and upgrade to head
+    cols = {c["name"] for c in sa.inspect(engine).get_columns("notification")}
+    assert "action" in cols and "kind" not in cols
+
+
+def test_downgrade_0004_backfills_null_actions(engine):
+    """Ad hoc emits write action=NULL; the 0.15 kind column is NOT NULL, so
+    the downgrade must backfill instead of dying half-reverted."""
+    asas_notifications.migrate(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO notification "
+                "(org_id, user_id, action, nature, urgency, reason, title, created_at) "
+                "VALUES (1, 1, NULL, 'info', 'low', 'participant', 'ad hoc', '2026-01-01')"
+            )
+        )
+    command.downgrade(_config(engine), "0003")
+    with engine.connect() as conn:
+        assert conn.execute(sa.text("SELECT kind FROM notification")).scalar() == "ad_hoc"

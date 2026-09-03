@@ -38,6 +38,17 @@ one-release deprecated alias where the DR promises one.
 - **`DeliveryPayload` renamed with the columns** (`action`, `nature`, plus new
   `topic`, `data`) — the payload's one rename; adapters remain
   render-consumers of a channel-agnostic payload.
+- Review hardening: the unknown-topic error fires inside `suppressed()` too
+  (suppression silences delivery, never catalog mistakes); topic validation
+  re-queries fresh on a cache miss (cross-replica seeding lag is one extra
+  SELECT, never a false LookupError); policy tie-breaks prefer the newest row;
+  the `register_kind` shim covers only fully-legacy calls (any explicit axis
+  ⇒ the new fail-loud contract) and warns at the emit site; coalesce folds
+  refresh `topic`/`template` alongside `data`; `list_feed` keeps a deprecated
+  `category=` alias; migration `0004` builds its `notification` indexes
+  CONCURRENTLY on Postgres and its downgrade backfills NULL `action` rows;
+  the adoption guard recognizes the post-rename schema instead of advising
+  the destruction of real data.
 
 ## 0.15.0 — 2026-08-28
 

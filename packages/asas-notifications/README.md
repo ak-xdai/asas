@@ -52,12 +52,19 @@ refs are plain ints — no host FKs):
 
 ```python
 import asas_notifications as notifications
+from asas_notifications import NotificationTopic
+from sqlmodel import Session, select
 
 # boot (host wiring)
 notifications.migrate(engine)
 notifications.configure_context_resolver(current_user_org)
 notifications.configure_recipient_filter(visible_recipients)
 notifications.register_adapter("email", MyEmailAdapter())
+with Session(engine) as s:  # seed your topics once — emits into an unseeded
+    if not s.exec(select(NotificationTopic)              # topic fail loud
+                  .where(NotificationTopic.key == "approvals")).first():
+        s.add(NotificationTopic(key="approvals", name="Approvals"))
+        s.commit()
 app.include_router(notifications.build_router(get_session),
                    dependencies=[Depends(require_user)])
 

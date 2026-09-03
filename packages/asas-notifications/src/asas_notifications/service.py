@@ -178,7 +178,7 @@ def _recipient_conditions(session: Session, user_id: int) -> list:
 # in-process for a short TTL — admin changes propagate within a minute across
 # replicas, with no invalidation bus (deliberate; DR 0003).
 CONFIG_TTL_SECONDS = 60
-_topic_cache: dict[Optional[int], tuple[datetime, frozenset]] = {}
+_topic_cache: dict[str, tuple[datetime, frozenset]] = {}
 _policy_cache: dict[Optional[int], tuple[datetime, tuple]] = {}
 
 
@@ -194,21 +194,29 @@ def _fresh(entry) -> bool:
     )
 
 
-def _topic_keys(session: Session, org: Optional[int]) -> frozenset:
-    """Topic keys visible to this org: platform rows plus its override rows."""
-    entry = _topic_cache.get(org)
+def _all_topic_keys(session: Session, *, refresh: bool = False) -> frozenset:
+    """Every topic key in the table (any org). Validation is org-agnostic —
+    its job is catching typos and unseeded topics, and a key seeded for any
+    org is not a typo; org scoping happens in policy resolution, which just
+    falls back for a topic with no rows for this org."""
+    entry = None if refresh else _topic_cache.get("all")
     if not _fresh(entry):
-        rows = session.exec(
-            select(NotificationTopic.key).where(
-                sa_or(
-                    NotificationTopic.org_id.is_(None),
-                    NotificationTopic.org_id == org,
-                )
-            )
-        ).all()
+        rows = session.exec(select(NotificationTopic.key)).all()
         entry = (datetime.utcnow(), frozenset(rows))
-        _topic_cache[org] = entry
+        _topic_cache["all"] = entry
     return entry[1]
+
+
+def _topic_known(session: Session, topic: str) -> bool:
+    """Membership with a fresh re-query on miss: a topic seeded on another
+    replica inside the TTL window must degrade to one extra SELECT, never to a
+    transaction-aborting false LookupError. (The inverse staleness — a key
+    cached from a transaction that later rolled back — expires with the TTL;
+    the emit it would wrongly admit routes to fallback policy and is
+    harmless.)"""
+    if topic in _all_topic_keys(session):
+        return True
+    return topic in _all_topic_keys(session, refresh=True)
 
 
 @dataclass(frozen=True)
@@ -286,15 +294,18 @@ def resolve_channels(
             and (r.nature is None or r.nature == nature.value)
         ]
         pick = None
+        # Ties (equally specific duplicate rows — the table has no uniqueness
+        # constraint) resolve to the NEWEST row: an admin's latest change must
+        # take effect, never be shadowed by a stale predecessor.
         if topic_rows:
-            pick = max(topic_rows, key=lambda r: (r.org_id is not None, -r.id))
+            pick = max(topic_rows, key=lambda r: (r.org_id is not None, r.id))
         elif axis_rows:
             pick = max(
                 axis_rows,
                 key=lambda r: (
                     r.org_id is not None,
                     (r.urgency is not None) + (r.nature is not None),
-                    -r.id,
+                    r.id,
                 ),
             )
         if pick is not None:
@@ -404,14 +415,25 @@ def notify(
             stacklevel=2,
         )
         nature = nature if nature is not None else category
-    spec = _KINDS.get(action) if action is not None else None
-    if spec is not None:
-        # A registered legacy kind supplies the axis defaults it always did;
-        # register_kind() already warned at wiring time.
-        nature = nature if nature is not None else spec.category
-        urgency = urgency if urgency is not None else spec.urgency
-        reason = reason if reason is not None else spec.reason
-        topic = topic if topic is not None else spec.topic
+    # The shim applies ONLY to fully-legacy calls (no axis passed at all): a
+    # call site that states even one axis has been converted and must get the
+    # new fail-loud contract, not silent backfill from a spec that will be
+    # deleted next release.
+    if (
+        action is not None
+        and nature is None
+        and urgency is None
+        and reason is None
+        and topic is None
+        and (spec := _KINDS.get(action)) is not None
+    ):
+        warnings.warn(
+            f"notify({action!r}) is using register_kind() defaults — pass the "
+            "four axes explicitly; the kind shim goes away next release (DR 0003)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        nature, urgency, reason, topic = spec.category, spec.urgency, spec.reason, spec.topic
 
     missing = [
         name
@@ -436,6 +458,17 @@ def notify(
     urg = Urgency(urgency)
     rsn = Reason(reason)
 
+    # The one reference an emit can get wrong that management depends on:
+    # policy rows and (U-3) preferences key on topic, so an unknown topic is a
+    # catalog mistake and fails loud — INSIDE suppressed() too, exactly like
+    # 0.15's unregistered-kind error: suppression silences delivery, never
+    # call-site mistakes.
+    if not _topic_known(session, topic):
+        raise LookupError(
+            f"unknown notification topic {topic!r}: seed it in "
+            "notification_topic (platform row) before emitting into it"
+        )
+
     if _suppress_notify.get():
         return []
     # Notifications are tenant-owned and ``Notification.org_id`` is NOT NULL.
@@ -453,16 +486,6 @@ def notify(
             "(background jobs, CLI, boot sweeps) or configure the context "
             "resolver — Notification.org_id is NOT NULL"
         )
-    # The one reference an emit can get wrong that management depends on:
-    # policy rows and (U-3) preferences key on topic, so an unknown topic is a
-    # catalog mistake and fails loud (the guide's fail-loud property, kept
-    # exactly where it still has a job).
-    if topic not in _topic_keys(session, org):
-        raise LookupError(
-            f"unknown notification topic {topic!r}: seed it in "
-            "notification_topic (platform row) before emitting into it"
-        )
-
     ids = list(dict.fromkeys(u for u in recipients if u is not None))
     if actor_user_id is not None:
         ids = [u for u in ids if u != actor_user_id]
@@ -536,6 +559,12 @@ def notify(
             existing.body = merge_body(existing.body, body) if merge_body else body
             if data is not None:
                 existing.data = data  # latest data wins, like the title (DR 0003 S-3)
+            # The fold IS the latest event, so its classification and template
+            # come along with its text — a pre-0004 row (topic NULL) gets
+            # labeled on first fold, and U-4's renderer must never pair v2
+            # data with a stale v1 template.
+            existing.topic = topic
+            existing.template = template
             existing.created_at = datetime.utcnow()
             session.add(existing)
             updated.append(existing)
@@ -599,6 +628,7 @@ def list_feed(
     nature: Optional[Nature] = None,
     page: int = 1,
     page_size: int = 20,
+    category: Optional[Nature] = None,  # deprecated alias for nature (0.15 name)
 ) -> tuple[list[Notification], int]:
     """One page of the recipient's feed plus the filtered total, paged in SQL.
 
@@ -608,6 +638,13 @@ def list_feed(
     shared snapshot: a commit landing between them can skew total against the
     page by a row — the standard COUNT + LIMIT/OFFSET trade, transient and
     self-healing on the next poll."""
+    if category is not None:
+        warnings.warn(
+            "list_feed(category=...) is deprecated: the parameter is nature= now",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        nature = nature if nature is not None else category
     conditions = _recipient_conditions(session, user_id)
     if state == "open":
         conditions.append(Notification.archived_at.is_(None))

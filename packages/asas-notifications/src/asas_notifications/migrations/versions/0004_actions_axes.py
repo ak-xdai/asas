@@ -10,10 +10,12 @@
   topic ``general`` — the designated home for ad hoc emits and the legacy
   ``register_kind`` shim.
 
-Index create/drop is guarded by inspector existence checks (adopting hosts may
-carry different historical index names; partial runs stay retryable — the 0003
-house pattern). Column renames and table creates are plain DDL: cheap metadata
-operations on both engines, no CONCURRENTLY concerns.
+Index create/drop on ``notification`` follows the 0003 house pattern in full:
+existence-guarded, built CONCURRENTLY on Postgres (the table can be large and
+hot; a plain build blocks every write), with interrupted-build INVALID leftovers
+rebuilt. Column renames and the new empty config tables are plain DDL — cheap
+metadata operations on both engines. Downgrade backfills NULL ``action`` rows
+(ad hoc emits) before restoring the NOT NULL ``kind`` column.
 
 Revision ID: 0004
 Revises: 0003
@@ -36,6 +38,45 @@ def _index_names(table: str) -> set:
     return {ix["name"] for ix in sa.inspect(op.get_bind()).get_indexes(table)}
 
 
+def _pg_index_valid(name: str) -> bool:
+    return op.get_bind().execute(
+        sa.text(
+            "SELECT i.indisvalid FROM pg_catalog.pg_index i "
+            "WHERE i.indexrelid = :name::regclass"
+        ),
+        {"name": name},
+    ).scalar()
+
+
+def _create_live(table: str, name: str, columns: list) -> None:
+    """CREATE INDEX on a live table — CONCURRENTLY on Postgres (the 0003 house
+    pattern: notification can be large and hot; a plain build blocks every
+    write for its duration), with a name-matching INVALID leftover from an
+    interrupted concurrent build dropped and rebuilt rather than skipped."""
+    if op.get_bind().dialect.name == "postgresql":
+        if name in _index_names(table):
+            if _pg_index_valid(name):
+                return
+            with op.get_context().autocommit_block():
+                op.drop_index(name, table_name=table, postgresql_concurrently=True)
+        with op.get_context().autocommit_block():
+            op.create_index(name, table, columns, unique=False, postgresql_concurrently=True)
+    else:
+        if name in _index_names(table):
+            return
+        op.create_index(name, table, columns, unique=False)
+
+
+def _drop_live(table: str, name: str) -> None:
+    if name not in _index_names(table):
+        return
+    if op.get_bind().dialect.name == "postgresql":
+        with op.get_context().autocommit_block():
+            op.drop_index(name, table_name=table, postgresql_concurrently=True)
+    else:
+        op.drop_index(name, table_name=table)
+
+
 def upgrade() -> None:
     with op.batch_alter_table("notification", schema=None) as batch_op:
         batch_op.alter_column(
@@ -53,14 +94,9 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("data", sa.JSON(), nullable=True))
         batch_op.add_column(sa.Column("template", sa.String(), nullable=True))
 
-    names = _index_names("notification")
-    if "ix_notification_kind" in names:
-        op.drop_index("ix_notification_kind", table_name="notification")
-    names = _index_names("notification")
-    if "ix_notification_action" not in names:
-        op.create_index("ix_notification_action", "notification", ["action"])
-    if "ix_notification_topic" not in names:
-        op.create_index("ix_notification_topic", "notification", ["topic"])
+    _drop_live("notification", "ix_notification_kind")
+    _create_live("notification", "ix_notification_action", ["action"])
+    _create_live("notification", "ix_notification_topic", ["topic"])
 
     op.create_table(
         "notification_topic",
@@ -149,11 +185,12 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("notification_channel_policy")
     op.drop_table("notification_topic")
-    names = _index_names("notification")
-    if "ix_notification_topic" in names:
-        op.drop_index("ix_notification_topic", table_name="notification")
-    if "ix_notification_action" in names:
-        op.drop_index("ix_notification_action", table_name="notification")
+    _drop_live("notification", "ix_notification_topic")
+    _drop_live("notification", "ix_notification_action")
+    # 0.16 ad hoc emits legitimately write action = NULL; the 0.15 column is
+    # NOT NULL, so they must be backfilled before the rename or the downgrade
+    # dies mid-flight (half-reverted on engines without transactional DDL).
+    op.execute(sa.text("UPDATE notification SET action = 'ad_hoc' WHERE action IS NULL"))
     with op.batch_alter_table("notification", schema=None) as batch_op:
         batch_op.drop_column("template")
         batch_op.drop_column("data")
@@ -169,5 +206,4 @@ def downgrade() -> None:
         batch_op.alter_column(
             "action", new_column_name="kind", existing_type=sa.String(), nullable=False
         )
-    if "ix_notification_kind" not in _index_names("notification"):
-        op.create_index("ix_notification_kind", "notification", ["kind"])
+    _create_live("notification", "ix_notification_kind", ["kind"])
