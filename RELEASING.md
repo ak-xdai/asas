@@ -42,7 +42,12 @@ new policy so much as an admission of what the versions were already doing.
    - bump `version` in `pyproject.toml` **and** `__version__` in `__init__.py` for
      each changed package (a repo-wide test fails if they disagree);
    - add a `CHANGELOG.md` entry per changed package — what a *consumer* must do
-     differently, not a commit list. Breaking changes first.
+     differently, not a commit list. Breaking changes first;
+   - bump the package's entry in `asas-cli`'s `FALLBACK_TAGS`
+     (`packages/asas-cli/src/asas_cli/git_tags.py`) — the offline pin
+     `asas add`/`asas new` fall back to. The same repo-wide test fails if it
+     lags the `pyproject.toml` version. (Library packages only: `asas-cli`
+     itself is not installable via `asas add` and has no entry.)
 2. Land it on `main`. The bump and the changelog land **with** the code, so the
    commit you tag is the commit that describes itself.
 3. Tag each changed package from that `main` revision:

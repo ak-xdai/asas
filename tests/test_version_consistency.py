@@ -42,8 +42,9 @@ def _changelog_version(pkg: pathlib.Path) -> str:
 
 
 def test_every_package_is_checked():
-    """Ten packages; a new one must not slip past this file unnoticed."""
-    assert len(PACKAGES) == 10, [p.name for p in PACKAGES]
+    """Eleven packages (the original ten plus asas-cli, added deliberately here
+    so a twelfth can't slip past this file unnoticed)."""
+    assert len(PACKAGES) == 11, [p.name for p in PACKAGES]
 
 
 @pytest.mark.parametrize("pkg", PACKAGES, ids=lambda p: p.name)
@@ -55,4 +56,46 @@ def test_version_agrees_across_all_three(pkg):
         f"{pkg.name} disagrees with itself: pyproject.toml={pyproject}, "
         f"__version__={dunder}, newest CHANGELOG heading={changelog}. "
         f"A release updates all three (RELEASING.md)."
+    )
+
+
+# ── asas-cli's copies of the package facts ──────────────────────────────────
+#
+# The CLI ships two hand-maintained snapshots of this repository: which
+# packages exist (registry._SPECS) and each one's newest release tag
+# (git_tags.FALLBACK_TAGS, the offline pin). Both are read here as source
+# text — same rule as above, no imports — so a release or a new package that
+# forgets the CLI fails on the PR that forgot it, not on some consumer's
+# offline install months later.
+
+CLI_SRC = ROOT / "packages" / "asas-cli" / "src" / "asas_cli"
+NON_CLI_PACKAGES = [p for p in PACKAGES if p.name != "asas-cli"]
+
+
+def _fallback_tags() -> dict[str, str]:
+    text = (CLI_SRC / "git_tags.py").read_text()
+    block = re.search(r"FALLBACK_TAGS[^{]*\{(.*?)\}", text, re.S).group(1)
+    return dict(re.findall(r'"([a-z0-9-]+)":\s*"(v\d+\.\d+\.\d+)"', block))
+
+
+def _registry_dist_names() -> set[str]:
+    text = (CLI_SRC / "registry.py").read_text()
+    return set(re.findall(r'"(asas-[a-z0-9-]+)",\n\s+"asas_', text))
+
+
+def test_cli_registry_matches_the_packages_directory():
+    expected = {p.name for p in NON_CLI_PACKAGES}
+    assert _registry_dist_names() == expected, (
+        "asas_cli.registry._SPECS disagrees with packages/ — a package was "
+        "added or renamed without updating the CLI's roster."
+    )
+
+
+@pytest.mark.parametrize("pkg", NON_CLI_PACKAGES, ids=lambda p: p.name)
+def test_cli_fallback_tag_is_current(pkg):
+    fallback = _fallback_tags().get(pkg.name)
+    assert fallback == f"v{_pyproject_version(pkg)}", (
+        f"asas_cli.git_tags.FALLBACK_TAGS[{pkg.name!r}] is {fallback}, but the "
+        f"package is at {_pyproject_version(pkg)} — bumping FALLBACK_TAGS is a "
+        "release step (RELEASING.md), or offline installs pin a stale version."
     )
