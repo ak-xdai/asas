@@ -6,13 +6,18 @@ from typing import Optional
 
 from sqlmodel import SQLModel
 
-from .models import Category, Reason, Urgency
+from typing import Any
+
+from .models import Nature, Reason, Urgency
 
 
 class NotificationRead(SQLModel):
     id: int
-    kind: str
-    category: Category
+    #: The application action that caused this row (DR 0003) — None for ad hoc
+    #: emits and for rows predating 0.16 that were never re-labeled.
+    action: Optional[str] = None
+    topic: Optional[str] = None
+    nature: Nature
     urgency: Urgency
     reason: Reason
     entity_type: Optional[str] = None
@@ -20,6 +25,8 @@ class NotificationRead(SQLModel):
     title: str
     body: Optional[str] = None
     link: Optional[str] = None
+    template: Optional[str] = None
+    data: Optional[dict[str, Any]] = None
     read_at: Optional[datetime] = None
     archived_at: Optional[datetime] = None
     created_at: datetime

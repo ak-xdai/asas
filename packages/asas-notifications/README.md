@@ -1,8 +1,11 @@
 # asas-notifications
 
-A generic notification engine: producers register event **kinds** (category ×
-urgency × reason taxonomy) and call `notify` inside their own transaction — the
-insert IS the enqueue, so a notification exists iff the domain change committed.
+A generic notification engine (DR 0003): producers call `notify` inside their
+own transaction — the insert IS the enqueue, so a notification exists iff the
+domain change committed — passing the **application action** that caused the
+emit (`action="job.publish"`, a reference declared nowhere) and four
+classification **axes** (topic × nature × urgency × reason). Behavior attaches
+to the axes, never to individual actions; the DB stores only deviations.
 The in-app feed is the `notification` row itself (`build_router` serves it);
 external channels go through the `notification_delivery` outbox and registered
 **channel adapters** (email, chat, …).
@@ -12,16 +15,18 @@ Engine rules baked in (from Teamy's WXL-209 epic):
 - **Actor exclusion** — you are never notified of your own action.
 - **Visibility filtering** — recipients pass through the host's registered filter,
   so a notification never leaks a private record.
-- **Routing by urgency** — `low` is in-app only (ambient activity never emails);
-  `normal`/`high` get delivery rows. Unread ambient rows can **coalesce** per
-  (recipient, kind, entity) so an edit burst stays one bell entry.
+- **Data-driven routing** — per channel, most specific wins: topic policy row →
+  axis policy row → the built-in fallback (`low` is in-app only — ambient
+  activity never emails; `normal`/`high` add email). Empty policy tables
+  reproduce the fallback exactly. Unread ambient rows can **coalesce** per
+  (org, recipient, action, entity) so an edit burst stays one bell entry.
 - **Duplicate-safe dispatch** — each outbox row is claimed with a rows-affected
   CAS before the adapter send; overlapping passes (hook vs job vs second
   instance) lose the CAS and skip. Stale claims from crashed passes reclaim.
   At-least-once overall; failures retry to an attempt cap, `SkipDelivery` marks
   a graceful no-retry skip.
 
-Table-owning + router variant of the Asas host contract (2 tables; org/user
+Table-owning + router variant of the Asas host contract (4 tables; org/user
 refs are plain ints — no host FKs):
 
 - **`migrate(engine)`** — package Alembic chain
@@ -40,9 +45,10 @@ refs are plain ints — no host FKs):
   hold only the type and the id — so the filter gets both and decides: use the
   row, resolve it from the id, or return `user_ids` unchanged for an entity
   type that needs no gating.
-- **`register_kind` / `register_adapter`** — the kind catalog and channel
-  adapters are the host's; `dispatch_pending(engine)` is one outbox pass and the
-  host owns the cadences (after-commit hook, boot sweep, periodic job).
+- **`register_adapter`** — channel adapters are the host's;
+  `dispatch_pending(engine)` is one outbox pass and the host owns the cadences
+  (after-commit hook, boot sweep, periodic job). (`register_kind` survives 0.16
+  as a deprecated shim — one release, DR 0003 I-3.)
 
 ```python
 import asas_notifications as notifications
@@ -51,15 +57,15 @@ import asas_notifications as notifications
 notifications.migrate(engine)
 notifications.configure_context_resolver(current_user_org)
 notifications.configure_recipient_filter(visible_recipients)
-notifications.register_kind("workflow.approval_requested",
-                            category="action", urgency="normal", reason="participant")
 notifications.register_adapter("email", MyEmailAdapter())
 app.include_router(notifications.build_router(get_session),
                    dependencies=[Depends(require_user)])
 
 # producers (inside their own transaction)
-notifications.notify(session, recipient_user_ids, "workflow.approval_requested",
-                     title="Budget change", record=project, entity_type="project",
+notifications.notify(session, recipient_user_ids, "workflow.request_approval",
+                     topic="approvals", nature="action", urgency="normal",
+                     reason="participant", title="Budget change",
+                     record=project, entity_type="project",
                      entity_id=project.id, actor_user_id=actor.id)
 
 # dispatch cadence of your choosing

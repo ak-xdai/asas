@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asas-notifications"
-version = "0.15.0"
+version = "0.16.0"
 description = "Asas notifications module: a generic notification engine — registered kinds, transactional emits with visibility filtering and unread coalescing, an in-app feed API, and a duplicate-safe per-channel delivery outbox with pluggable adapters."
 readme = "README.md"
 requires-python = ">=3.11"

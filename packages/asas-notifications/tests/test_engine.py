@@ -19,9 +19,24 @@ from asas_notifications.service import MAX_ATTEMPTS
 from conftest import emit
 
 
-def test_unregistered_kind_fails_loud(session):
-    with pytest.raises(LookupError):
-        notifications.notify(session, [1], "never.registered", title="x")
+def test_action_without_axes_fails_loud(session):
+    """DR 0003: there is no kind catalog to default from — an action emitted
+    without its axes is the new "unregistered kind" and fails just as loud
+    (TypeError at the call site, nothing inserted)."""
+    with pytest.raises(TypeError, match="axis"):
+        notifications.notify(session, [1], "never.declared", title="x")
+
+
+def test_unknown_topic_fails_loud(session):
+    """The one reference an emit can get wrong that management depends on:
+    policy and preferences key on topic, so an unseeded topic is a catalog
+    mistake."""
+    with pytest.raises(LookupError, match="topic"):
+        notifications.notify(
+            session, [1], "job.publish",
+            topic="never.seeded", nature="info", urgency="low",
+            reason="participant", title="x",
+        )
 
 
 def test_normal_kind_routes_email_low_stays_in_app(session, kind, ambient_kind):
@@ -67,10 +82,13 @@ def test_coalesce_unread_updates_in_place(session, ambient_kind):
 
 
 def test_suppressed_context_no_ops_but_validates(session, kind):
+    """Suppression silences delivery, never call-site mistakes: the axes are
+    still required inside the block (the DR 0003 analog of the old
+    unregistered-kind LookupError)."""
     with notifications.suppressed():
         assert notifications.notify(session, [1], kind, title="x") == []
-        with pytest.raises(LookupError):
-            notifications.notify(session, [1], "never.registered", title="x")
+        with pytest.raises(TypeError, match="axis"):
+            notifications.notify(session, [1], "never.declared", title="x")
     assert session.exec(select(Notification)).all() == []
 
 

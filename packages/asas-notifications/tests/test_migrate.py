@@ -202,3 +202,41 @@ def test_migration_0003_rebuilds_an_invalid_concurrent_index(engine):
         row = conn.execute(validity).one()
     assert row.indisvalid is True
     assert row.indisunique is False  # the migration's definition, not the leftover
+
+
+def test_migration_0004_renames_in_place_and_seeds_general(engine):
+    """0004 renames kind→action and category→nature with data surviving in
+    place, adds the axis columns, creates the config tables, and seeds the
+    `general` platform topic the ad hoc path and the register_kind shim rely
+    on."""
+    command.upgrade(_config(engine), "0003")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO notification "
+                "(org_id, user_id, kind, category, urgency, reason, title, created_at) "
+                "VALUES (1, 1, 'workflow.approval_requested', 'action', 'normal', "
+                "'participant', 'Budget change', '2026-01-01')"
+            )
+        )
+
+    asas_notifications.migrate(engine)
+
+    inspector = sa.inspect(engine)
+    cols = {c["name"] for c in inspector.get_columns("notification")}
+    assert {"action", "nature", "topic", "data", "template"} <= cols
+    assert "kind" not in cols and "category" not in cols
+    with engine.connect() as conn:
+        row = conn.execute(
+            sa.text("SELECT action, nature, topic FROM notification")
+        ).one()
+        assert row.action == "workflow.approval_requested"
+        assert row.nature == "action"
+        assert row.topic is None  # historical rows are deliberately unbackfilled
+        seeded = conn.execute(
+            sa.text(
+                "SELECT key, org_id FROM notification_topic WHERE key = 'general'"
+            )
+        ).one()
+        assert seeded.org_id is None  # a platform row
+    assert inspector.has_table("notification_channel_policy")

@@ -24,20 +24,28 @@ class SkipDelivery(Exception):
 class DeliveryPayload:
     """Everything an adapter may need, without touching the ORM. Recipient contact
     details (email address, Slack id) are the adapter's own concern — resolved on
-    its side of the seam so this package stays model-free."""
+    its side of the seam so this package stays model-free.
+
+    DR 0003 S-7 (0.16, breaking): ``kind`` → ``action`` and ``category`` →
+    ``nature``, plus the new ``topic`` and ``data`` fields — the payload's one
+    rename, made with the columns so the package keeps a single vocabulary.
+    Adapters remain render-consumers: ``title``/``body`` arrive final (post-
+    template once U-4 lands) and adapters never touch templates."""
 
     delivery_id: int
     notification_id: int
     channel: str
     recipient_user_id: int
     org_id: int
-    kind: str
-    category: str
+    action: Optional[str]
+    topic: Optional[str]
+    nature: str
     urgency: str
     reason: str
     title: str
     body: Optional[str]
     link: Optional[str]
+    data: Optional[dict]
     created_at: datetime
 
 
@@ -77,7 +85,7 @@ class LoggingAdapter:
             "notification %s → %s [%s/%s] %r",
             payload.notification_id,
             payload.channel,
-            payload.category,
+            payload.nature,
             payload.urgency,
             payload.title,
         )

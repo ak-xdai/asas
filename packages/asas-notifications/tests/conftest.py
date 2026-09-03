@@ -29,6 +29,7 @@ def _clean_registries():
     channels._ADAPTERS.clear()
     service._context_resolver = None
     service._recipient_filter = None
+    service.config_cache_clear()
 
 
 @pytest.fixture()

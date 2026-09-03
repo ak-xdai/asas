@@ -5,6 +5,40 @@ Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
+## 0.16.0 — 2026-09-03
+
+Implements DR 0003 (U-1 + U-2): action-referenced notifications and axis-based,
+data-driven routing. **Breaking** (pre-1.0 minor); every rename below keeps a
+one-release deprecated alias where the DR promises one.
+
+- **`kind` is gone; emits reference the application action.** `notify()` takes
+  `action=` — the app's own `entity.verb` id, a reference declared nowhere —
+  plus the four axes `topic=` / `nature=` (was `category`) / `urgency=` /
+  `reason=`. `action` is nullable: ad hoc emits carry axes only and never
+  coalesce. Coalescing keys on (org, recipient, action, entity).
+- **`register_kind()` is a deprecated shim** (one release): a registered kind
+  supplies axis defaults for emits that pass its name, with `topic` defaulting
+  to the seeded `general` topic. `notify(kind=...)`/`notify(category=...)`
+  warn and map to `action=`/`nature=`.
+- **Routing is data-driven** (migration `0004`): new deviation-only tables
+  `notification_topic` and `notification_channel_policy` (platform rows +
+  org override rows, DR 0001's shared-with-overrides pattern). Per channel,
+  most specific wins: topic row → axis row → the built-in fallback, which is
+  exactly the 0.15 rule — empty tables reproduce 0.15 routing bit-for-bit
+  (equivalence-tested). `in_app` is an explicit channel: a policy that
+  disables it suppresses the whole insert. Config reads are TTL-cached (60s;
+  `config_cache_clear()` for tests/admin writes). Unknown topics fail loud.
+- **Schema** (`0004`): `notification.kind` → `action` (nullable), `category`
+  → `nature`, new `topic`, `data` (JSON presentation payload — same PII
+  posture as `title`; latest wins on coalesce), `template` (reference stored
+  now; rendering lands with U-4). Feed API: `NotificationRead` carries
+  `action`/`topic`/`nature`/`template`/`data`; the `?category=` filter remains
+  as a deprecated alias for `?nature=` for one release. `service.list_feed`
+  filter kwarg is `nature=`.
+- **`DeliveryPayload` renamed with the columns** (`action`, `nature`, plus new
+  `topic`, `data`) — the payload's one rename; adapters remain
+  render-consumers of a channel-agnostic payload.
+
 ## 0.15.0 — 2026-08-28
 
 Re-lands the still-open parts of PR #20 (opened against 0.12.0; its emit-side

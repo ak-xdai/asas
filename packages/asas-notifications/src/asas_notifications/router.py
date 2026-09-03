@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session
 
 from . import service
-from .models import Category
+from .models import Nature
 from .schemas import (
     ArchiveResult,
     NotificationList,
@@ -46,8 +46,13 @@ def build_router(get_session) -> APIRouter:
             "open", description="open = still in the inbox; archived = filed away"
         ),
         unread_only: bool = False,
-        category: Optional[Category] = Query(
+        nature: Optional[Nature] = Query(
             None, description="action | info | warning — composes with state"
+        ),
+        category: Optional[Nature] = Query(
+            None,
+            deprecated=True,
+            description="DEPRECATED alias for nature= (0.15 name; one release)",
         ),
         session: Session = Depends(get_session),
     ):
@@ -65,7 +70,7 @@ def build_router(get_session) -> APIRouter:
             user_id,
             state=state,
             unread_only=unread_only,
-            category=category,
+            nature=nature if nature is not None else category,
             page=page,
             page_size=page_size,
         )

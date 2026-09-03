@@ -32,37 +32,50 @@ from .channels import (
 )
 from .migrate import migrate
 from .models import (
-    Category,
+    Category,  # deprecated alias for Nature (one release)
     DeliveryStatus,
+    Nature,
     Notification,
+    NotificationChannelPolicy,
     NotificationDelivery,
+    NotificationTopic,
     Reason,
     Urgency,
 )
 from .router import build_router
 from .service import (
+    DEFAULT_TOPIC,
+    IN_APP,
+    config_cache_clear,
     configure_context_resolver,
     configure_recipient_filter,
     dispatch_pending,
     notify,
-    register_kind,
+    register_kind,  # deprecated shim (DR 0003 I-3; one release)
+    resolve_channels,
     suppressed,
 )
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 __all__ = [
     "Category",
     "ChannelAdapter",
+    "DEFAULT_TOPIC",
     "DeliveryPayload",
     "DeliveryStatus",
+    "IN_APP",
     "LoggingAdapter",
+    "Nature",
     "Notification",
+    "NotificationChannelPolicy",
     "NotificationDelivery",
+    "NotificationTopic",
     "Reason",
     "SkipDelivery",
     "Urgency",
     "build_router",
+    "config_cache_clear",
     "configure_context_resolver",
     "configure_recipient_filter",
     "dispatch_pending",
@@ -70,6 +83,7 @@ __all__ = [
     "notify",
     "register_adapter",
     "register_kind",
+    "resolve_channels",
     "service",
     "suppressed",
     "__version__",
