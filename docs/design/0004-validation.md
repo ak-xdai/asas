@@ -173,12 +173,11 @@ enforce([
 #             params={"days": 3}, message_key="interview.min_notice")
 ```
 
-- Ships with: `not_in_future`, `not_in_past`, `after`, `before`,
-  `not_older_than(years=)`, `between`, `required_when` (~7 shapes covering
-  the vast majority of real rules). The naming review collapsed the earlier
-  trio `order` / `not_before` / `min_gap` into one check — `after(value,
-  reference, days=0)` plus a symmetric `before` — and renamed `max_age` →
-  `not_older_than` ("age" implied a person) and `within_range` → `between`.
+- Ships with the **44-check catalog** (V-1a) — six families: temporal (12),
+  numeric (8), cross-field (6), presence/conditional (5), format (10),
+  collections (3). Earlier drafts named ~7; review round six expanded to a
+  full catalog sourced from Laravel/validator.js/Joi/Django validators,
+  filtered by the generic-only rule and renamed into the read-aloud grammar.
 - Violation carries `message_key` + `params`; literal `message=` allowed for
   one-offs. **`enforce(violations)`** drops the `None`s and folds the rest
   into the 422 envelope; being a *new* name, v0.11's `raise_if_invalid`
@@ -209,6 +208,51 @@ enforce([
   endpoint, and the future template dropdowns; ``validate()`` checks arity
   and types and fails loud with the expected signature named in the error;
   the sentence template is the R6/R11 plain-language rendering for free.
+
+### V-1a The shipped catalog (44 checks, review round six)
+
+Sourced from the union of mainstream SaaS/framework validators (Laravel
+rules, validator.js, Joi/Zod, Django/Rails), kept only where generic and
+renamed into the grammar. Every check: values first, params named, a
+``sentence`` template, catalog-listed.
+
+**Temporal (12)**: ``not_in_future(v)`` · ``not_in_past(v)`` ·
+``after(v, ref, days=0)`` · ``before(v, ref, days=0)`` ·
+``between(v, start, end)`` · ``not_older_than(v, years=|days=)`` ·
+``not_beyond(v, years=|days=)`` (max future horizon) ·
+``age_at_least(birth, years=18)`` · ``age_at_most(birth, years=)`` ·
+``on_weekday(v, allowed=[0..4])`` ·
+``within_period(start, end, p_start, p_end)`` (range inside parent range) ·
+``no_overlap(start, end, o_start, o_end)`` (booking clashes).
+
+**Numeric (8)**: ``at_least(v, minimum)`` · ``at_most(v, maximum)`` ·
+``positive(v)`` · ``non_negative(v)`` · ``multiple_of(v, step)`` ·
+``max_decimals(v, places=2)`` · ``percent(v)`` · ``luhn(v)``.
+
+**Cross-field (6)**: ``greater_than(v, ref)`` · ``less_than(v, ref)`` ·
+``equal_to(v, ref)`` (confirmation fields) · ``different_from(v, ref)``
+(new ≠ old) · ``sums_to(*parts, total=)`` (splits) ·
+``ratio_at_least(v, ref, ratio=)`` (the generic "band" rule).
+
+**Presence/conditional (5)**: ``required_when(v, when=)`` ·
+``forbidden_when(v, when=)`` · ``required_together(*vs)`` ·
+``at_least_one(*vs)`` · ``exactly_one(*vs)``.
+
+**Format (10)**: ``email(v, domains=None)`` · ``url(v, schemes=("https",))``
+· ``phone(v, region=None)`` · ``iban(v)`` · ``uuid(v)`` · ``slug(v)`` ·
+``matches(v, pattern)`` (regex escape hatch) · ``no_html(v)`` ·
+``one_of(v, allowed)`` (membership against dynamic lists, e.g. asas-lookups)
+· ``not_in(v, forbidden)``.
+
+**Collections (3)**: ``unique_items(vs)`` · ``subset_of(vs, allowed)`` ·
+``contains_none(vs, terms)``.
+
+**Deliberately excluded**: type/required/length/size checks (Pydantic — the
+boundary stands); DB uniqueness/foreign-existence (a pure value check must
+not hold a query seam; host router code today, possible seam later — open
+question 5); authorization (asas-access); region-specific ids (Emirates ID
+etc. — violate generic-only; future opt-in regional packs via
+``checks.register``).
 
 ### V-2 Declared rules become stored bindings of checks
 
@@ -273,5 +317,9 @@ P2 is the one breaking refactor (pre-1.0 minor bump).
    semantics are checks"?
 3. Should V-5's JS evaluator wait for the repo's JS-workspace decision
    (shared with @asas/notifications-react), or ship as a separate npm repo?
-4. Trigger review for adopting CEL/JsonLogic as the expression core: is the
-   ">~20 checks or boolean-composition demand" threshold right?
+4. The CEL/JsonLogic revisit trigger said ">~20 checks" — V-1a now ships 44
+   *primitives*, which is vocabulary breadth, not composition demand.
+   Re-state the trigger as: demand for arbitrary boolean composition or
+   runtime-defined logic, regardless of catalog size?
+5. DB-backed checks (uniqueness, foreign existence): permanently excluded,
+   or a future opt-in query seam?
