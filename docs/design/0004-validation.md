@@ -177,6 +177,28 @@ enforce([
   coercion (never a 500 from a type mix).
 - Inline calls are the blessed 70% path: no catalog, no ceremony, one line.
 
+**Code/table boundary and signatures** (review round three, 2026-09-11):
+
+- ``checks.register`` registers an *implementation* and stays in code —
+  executable logic in a database row is unreviewable, untestable, and
+  unauditable, and admins configure behavior, never author logic (the DR 0003
+  principle). Everything else is table-backed and hot-updatable with no
+  deployment: rule *applications* (which check applies to which fields),
+  ``params`` dials, messages, enabled/conditions — V-2/V-3 rows, TTL-cached,
+  audited. Genuinely new logic at runtime is exactly the CEL/JsonLogic
+  revisit trigger (§5): sandboxed expressions-as-data, never code-in-rows.
+- **Arguments**: a check takes ordered *values* (record data under test, one
+  or many) and named *params* (configuration constants — the dials). Stored
+  rules carry the identical split as ``bindings`` (ordered field refs) and
+  ``params`` (JSON), so inline calls and table rows are the same information.
+- **Discoverability**: registration carries the signature as data — value
+  slots (name, type, description), params schema with defaults, and a
+  ``sentence`` template ("{value} must be after {reference} by {days}
+  day(s)"). ``checks.catalog()`` serves it to agents, docs, the rules
+  endpoint, and the future template dropdowns; ``validate()`` checks arity
+  and types and fails loud with the expected signature named in the error;
+  the sentence template is the R6/R11 plain-language rendering for free.
+
 ### V-2 Declared rules become stored bindings of checks
 
 `Rule` is refactored to *(entity, check, bindings, params, message_key,
