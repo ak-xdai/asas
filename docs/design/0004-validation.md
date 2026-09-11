@@ -22,7 +22,7 @@ validation):
 
 | Tier | Owns | Example |
 |---|---|---|
-| **Developer** | The invariants — what must structurally be true, and the vocabulary of checks | "end date ≥ start date"; the `not_before` check itself |
+| **Developer** | The invariants — what must structurally be true, and the vocabulary of checks | "end date ≥ start date"; the `after` check itself |
 | **Admin / product owner** | The dials — tunable thresholds and message wording | the **7** in "certificate younger than 7 years"; the Arabic message |
 | **Every surface** | Consumes the same declarations | form, API, import, agent, audit report |
 
@@ -74,7 +74,7 @@ Status legend: ✅ solved in asas-validation 0.11 · ⚠️ partial · ❌ not s
 | Req | Design approach | Decision notes |
 |---|---|---|
 | R2, R3 | **Keep unchanged.** The overlay engine and 422 envelope are the proven core; every layer below plugs into them | Nothing off the shelf replaces these (see §5) |
-| R4, N2 | **The check library** (this DR's centerpiece, §6 V-1): public, extensible predicates — `not_before(a, b, days=3)` — callable inline anywhere, returning a structured `Violation`, never a bare bool | Checks are pure functions over *values*; the declared layer binds *fields* to them. The current private `_KINDS` becomes the public registry |
+| R4, N2 | **The check library** (this DR's centerpiece, §6 V-1): public, extensible predicates — `after(a, b, days=3)` — callable inline anywhere, returning a structured `Violation`, never a bare bool | Checks are pure functions over *values*; the declared layer binds *fields* to them. The current private `_KINDS` becomes the public registry |
 | R1 | Checks-inline for the 70%; declared bindings for the 30%; (future) the actions layer makes validation a declared guard on the action so no path can skip it | Adoption is per-rule, never all-or-nothing |
 | R5 | **Policy tier**: a declared rule's `params` and message resolve DB-first with code defaults — deviation-only, one small optional table (the DR 0003 pattern). The base package stays table-less; the policy tier is an opt-in module with its own `migrate()` | Admin edits the dial, can never delete the invariant |
 | R6, R7 | Declared rules serve as **check-name + bindings + params** — a portable, interpretable format. A small reference JS evaluator ships for the built-in checks; hosts mirror custom checks or fall back to server-round-trip for them | Considered adopting JsonLogic/CEL as the wire format; rejected for v1 — named checks with published semantics are more legible to admins and renderable as sentences (R11). Revisit if check count explodes |
@@ -124,26 +124,38 @@ boolean composition).
 ### V-1 The check library (foundation — build first)
 
 Public, extensible predicates; the current private `_KINDS` promoted to a
-registry. A check is a pure function over **values**:
+registry. A check is a pure function over **values**.
+
+**Naming rule** (adopted in the guideline-simulation review, 2026-09-11):
+every check name completes the sentence *"<field> must be …"*, and the value
+under test is always the first argument — each call reads aloud as the
+business rule it enforces. This grammar is also what the admin template
+dropdowns and plain-language rule rendering (R6/R11) inherit later.
 
 ```python
-from asas_validation import checks
+from asas_validation import checks, enforce
 
-v = checks.not_before(interview_date, application_date, days=3,
-                      field="scheduled_date")
-# → None when valid, else
-#   Violation(field="scheduled_date", code="not_before",
-#             params={"days": 3}, message_key="validation.not_before")
+enforce([
+    checks.after(interview_date, application_date, days=3,
+                 field="scheduled_date", message_key="interview.min_notice"),
+])
+# each check → None when valid, else
+#   Violation(field="scheduled_date", code="after",
+#             params={"days": 3}, message_key="interview.min_notice")
 
 checks.register("multiple_of", my_predicate)   # hosts extend the vocabulary
 ```
 
-- Ships with: `not_future`, `not_past`, `order`, `min_gap` / `not_before`,
-  `max_age`, `within_range`, `required_when` (the ~8 shapes covering the vast
-  majority of real rules).
+- Ships with: `not_in_future`, `not_in_past`, `after`, `before`,
+  `not_older_than(years=)`, `between`, `required_when` (~7 shapes covering
+  the vast majority of real rules). The naming review collapsed the earlier
+  trio `order` / `not_before` / `min_gap` into one check — `after(value,
+  reference, days=0)` plus a symmetric `before` — and renamed `max_age` →
+  `not_older_than` ("age" implied a person) and `within_range` → `between`.
 - Violation carries `message_key` + `params`; literal `message=` allowed for
-  one-offs. `raise_if_invalid(collect(...))` folds any mix into the 422
-  envelope.
+  one-offs. **`enforce(violations)`** drops the `None`s and folds the rest
+  into the 422 envelope; being a *new* name, v0.11's `raise_if_invalid`
+  keeps its signature untouched through the migration — no breaking rename.
 - Clock seam: `configure_clock(fn)` supplying a tz-aware "today"; date/datetime
   coercion (never a 500 from a type mix).
 - Inline calls are the blessed 70% path: no catalog, no ceremony, one line.
