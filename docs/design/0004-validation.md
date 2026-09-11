@@ -74,7 +74,7 @@ Status legend: ✅ solved in asas-validation 0.11 · ⚠️ partial · ❌ not s
 | Req | Design approach | Decision notes |
 |---|---|---|
 | R2, R3 | **Keep unchanged.** The overlay engine and 422 envelope are the proven core; every layer below plugs into them | Nothing off the shelf replaces these (see §5) |
-| R4, N2 | **The check library** (this DR's centerpiece, §6 V-1): one dispatcher — `validate("after", a, b, days=3)` — callable inline anywhere, returning a structured `Violation`, never a bare bool | Checks are pure functions over *values*; the declared layer binds *fields* to them. The current private `_KINDS` becomes the public registry |
+| R4, N2 | **The check library** (this DR's centerpiece, §6 V-1): one namespace — `validate.after(a, b, days=3)` — callable inline anywhere, returning a structured `Violation`, never a bare bool | Checks are pure functions over *values*; the declared layer binds *fields* to them. The current private `_KINDS` becomes the public registry |
 | R1 | Checks-inline for the 70%; declared bindings for the 30%; (future) the actions layer makes validation a declared guard on the action so no path can skip it | Adoption is per-rule, never all-or-nothing |
 | R5 | **Descoped (round four).** All rule definition and application stays in code; the package remains table-less. The check registry's signature-as-data keeps the door open: a policy tier would only ever override `params`, so it can be added later without touching any rule | Complexity razor: the user's own adoption rule applied to the package itself |
 | R6, R7 | Declared rules serve as **check-name + bindings + params** — a portable, interpretable format. A small reference JS evaluator ships for the built-in checks; hosts mirror custom checks or fall back to server-round-trip for them | Considered adopting JsonLogic/CEL as the wire format; rejected for v1 — named checks with published semantics are more legible to admins and renderable as sentences (R11). Revisit if check count explodes |
@@ -132,31 +132,41 @@ under test is always the first argument — each call reads aloud as the
 business rule it enforces. This grammar is also what the admin template
 dropdowns and plain-language rule rendering (R6/R11) inherit later.
 
-**One method, one registry** (adopted in the same review): the application
-surface is a single dispatcher — ``validate(rule_name, *values, **params)`` —
-and rules are *defined* elsewhere, in the registry (library built-ins plus
-host registrations). The string rule name at every call site is the same
-identity that stored rules (V-2), the client evaluator (V-5), and the admin
-template list (R11) key on: inline calls already speak the storage and wire
-format. Cost, accepted: string dispatch trades IDE autocomplete for
-rules-as-data uniformity; an unknown name fails loud at runtime, and
-``checks.catalog()`` self-describes the vocabulary (names, param schemas,
-descriptions — the same payload the rules endpoint serves). Per-rule sugar
-(``checks.after(...)``) may be added later as thin aliases; the core and the
-docs teach one method.
+**One registry, two doors** (review rounds three and five): rules are
+*defined* in the registry (library built-ins plus host ``checks.register``)
+and *applied* through ``validate``, which every caller reaches by the door
+that suits it. The primary, human form is **attribute access** —
+``validate.after(a, b, days=3)`` — each built-in a real function, so the IDE
+autocompletes the name and shows the signature: what a check expects needs no
+description, the signature is the documentation. The equivalent **machine
+form** — ``validate("after", a, b, days=3)`` — serves callers holding the
+rule name as data (an agent reading ``checks.catalog()``, the client
+evaluator, a future stored rule); both forms hit the same dispatch, and
+host-registered checks appear as attributes too. Unknown names fail loud;
+``checks.catalog()`` self-describes the vocabulary for the dynamic callers.
+
+**Generic vocabulary only** (round five): the registry holds domain-free
+primitives — a check like ``interview_window`` is a design smell. Business
+meaning comes from *composing* generic checks at the call site (each
+violation then reports its own precise reason), and a recurring composite is
+wrapped in a plain host function returning a list of violations — ordinary
+code reuse, never a registry entry. ``enforce(list)`` drops the ``None``\ s
+and raises one 422 carrying **all** remaining violations, so the user sees
+every error in one response instead of fixing them one resubmit at a time.
 
 ```python
 from asas_validation import validate, enforce, checks
 
 # define (once, wiring module) — the "other place"
-checks.register("salary_band", check_salary_band, params={"ratio": "number"},
-                description="High salary must exceed low salary by the ratio")
+checks.register("iban", valid_iban,     # generic, domain-free primitives only
+                description="value must be a well-formed IBAN")
 
-# apply (anywhere) — the one method
+# apply (anywhere) — business meaning by composition of generic checks
 enforce([
-    validate("after", interview_date, application_date, days=3,
-             field="scheduled_date", message_key="interview.min_notice"),
-    validate("salary_band", low, high, ratio=1.2, field="salary_max"),
+    validate.between(scheduled_date, posting_date, closing_date,
+                     field="scheduled_date"),
+    validate.after(scheduled_date, application_date, days=3,
+                   field="scheduled_date", message_key="interview.min_notice"),
 ])
 # validate() → None when valid, else
 #   Violation(field="scheduled_date", code="after",
