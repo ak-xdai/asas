@@ -74,7 +74,7 @@ Status legend: ✅ solved in asas-validation 0.11 · ⚠️ partial · ❌ not s
 | Req | Design approach | Decision notes |
 |---|---|---|
 | R2, R3 | **Keep unchanged.** The overlay engine and 422 envelope are the proven core; every layer below plugs into them | Nothing off the shelf replaces these (see §5) |
-| R4, N2 | **The check library** (this DR's centerpiece, §6 V-1): public, extensible predicates — `after(a, b, days=3)` — callable inline anywhere, returning a structured `Violation`, never a bare bool | Checks are pure functions over *values*; the declared layer binds *fields* to them. The current private `_KINDS` becomes the public registry |
+| R4, N2 | **The check library** (this DR's centerpiece, §6 V-1): one dispatcher — `validate("after", a, b, days=3)` — callable inline anywhere, returning a structured `Violation`, never a bare bool | Checks are pure functions over *values*; the declared layer binds *fields* to them. The current private `_KINDS` becomes the public registry |
 | R1 | Checks-inline for the 70%; declared bindings for the 30%; (future) the actions layer makes validation a declared guard on the action so no path can skip it | Adoption is per-rule, never all-or-nothing |
 | R5 | **Policy tier**: a declared rule's `params` and message resolve DB-first with code defaults — deviation-only, one small optional table (the DR 0003 pattern). The base package stays table-less; the policy tier is an opt-in module with its own `migrate()` | Admin edits the dial, can never delete the invariant |
 | R6, R7 | Declared rules serve as **check-name + bindings + params** — a portable, interpretable format. A small reference JS evaluator ships for the built-in checks; hosts mirror custom checks or fall back to server-round-trip for them | Considered adopting JsonLogic/CEL as the wire format; rejected for v1 — named checks with published semantics are more legible to admins and renderable as sentences (R11). Revisit if check count explodes |
@@ -132,18 +132,35 @@ under test is always the first argument — each call reads aloud as the
 business rule it enforces. This grammar is also what the admin template
 dropdowns and plain-language rule rendering (R6/R11) inherit later.
 
-```python
-from asas_validation import checks, enforce
+**One method, one registry** (adopted in the same review): the application
+surface is a single dispatcher — ``validate(rule_name, *values, **params)`` —
+and rules are *defined* elsewhere, in the registry (library built-ins plus
+host registrations). The string rule name at every call site is the same
+identity that stored rules (V-2), the client evaluator (V-5), and the admin
+template list (R11) key on: inline calls already speak the storage and wire
+format. Cost, accepted: string dispatch trades IDE autocomplete for
+rules-as-data uniformity; an unknown name fails loud at runtime, and
+``checks.catalog()`` self-describes the vocabulary (names, param schemas,
+descriptions — the same payload the rules endpoint serves). Per-rule sugar
+(``checks.after(...)``) may be added later as thin aliases; the core and the
+docs teach one method.
 
+```python
+from asas_validation import validate, enforce, checks
+
+# define (once, wiring module) — the "other place"
+checks.register("salary_band", check_salary_band, params={"ratio": "number"},
+                description="High salary must exceed low salary by the ratio")
+
+# apply (anywhere) — the one method
 enforce([
-    checks.after(interview_date, application_date, days=3,
-                 field="scheduled_date", message_key="interview.min_notice"),
+    validate("after", interview_date, application_date, days=3,
+             field="scheduled_date", message_key="interview.min_notice"),
+    validate("salary_band", low, high, ratio=1.2, field="salary_max"),
 ])
-# each check → None when valid, else
+# validate() → None when valid, else
 #   Violation(field="scheduled_date", code="after",
 #             params={"days": 3}, message_key="interview.min_notice")
-
-checks.register("multiple_of", my_predicate)   # hosts extend the vocabulary
 ```
 
 - Ships with: `not_in_future`, `not_in_past`, `after`, `before`,
