@@ -58,7 +58,7 @@ Status legend: ✅ solved in asas-validation 0.11 · ⚠️ partial · ❌ not s
 | R2 | Edit-aware validation: partial updates check only the rules the edit touches, overlaying changes on the current record | ✅ the package's crown jewel |
 | R3 | Uniform field-level error envelope, shared with body-shape (Pydantic) errors | ✅ |
 | R4 | Open, extensible check vocabulary (dates, numbers, text, required-when, conditions) | ❌ 4 fixed date kinds; registry is private |
-| R5 | Tunable policy values (thresholds) and messages editable at runtime, no release | ❌ everything compiled in |
+| R5 | Tunable policy values at runtime, no release | ❌ — **descoped in review round four (2026-09-11)**: params change rarely, an admin logs in somewhere either way, and the developer updates logic anyway. Code-only; revisit only when a real deployment asks to turn a dial without a release |
 | R6 | Rules visible: machine endpoint + human-readable rendering | ⚠️ endpoint exists (ETag-correct); no plain-language rendering |
 | R7 | Client-side mirroring: the browser/agent evaluates the *same* rules | ⚠️ rules downloadable; client must hand-write an evaluator |
 | R8 | Localized messages (Arabic/English), product-editable | ❌ one hardcoded English string per rule |
@@ -76,7 +76,7 @@ Status legend: ✅ solved in asas-validation 0.11 · ⚠️ partial · ❌ not s
 | R2, R3 | **Keep unchanged.** The overlay engine and 422 envelope are the proven core; every layer below plugs into them | Nothing off the shelf replaces these (see §5) |
 | R4, N2 | **The check library** (this DR's centerpiece, §6 V-1): one dispatcher — `validate("after", a, b, days=3)` — callable inline anywhere, returning a structured `Violation`, never a bare bool | Checks are pure functions over *values*; the declared layer binds *fields* to them. The current private `_KINDS` becomes the public registry |
 | R1 | Checks-inline for the 70%; declared bindings for the 30%; (future) the actions layer makes validation a declared guard on the action so no path can skip it | Adoption is per-rule, never all-or-nothing |
-| R5 | **Policy tier**: a declared rule's `params` and message resolve DB-first with code defaults — deviation-only, one small optional table (the DR 0003 pattern). The base package stays table-less; the policy tier is an opt-in module with its own `migrate()` | Admin edits the dial, can never delete the invariant |
+| R5 | **Descoped (round four).** All rule definition and application stays in code; the package remains table-less. The check registry's signature-as-data keeps the door open: a policy tier would only ever override `params`, so it can be added later without touching any rule | Complexity razor: the user's own adoption rule applied to the package itself |
 | R6, R7 | Declared rules serve as **check-name + bindings + params** — a portable, interpretable format. A small reference JS evaluator ships for the built-in checks; hosts mirror custom checks or fall back to server-round-trip for them | Considered adopting JsonLogic/CEL as the wire format; rejected for v1 — named checks with published semantics are more legible to admins and renderable as sentences (R11). Revisit if check count explodes |
 | R8 | Violations carry a **message key + params**; message text lives in a translatable table beside the notification templates (same admin surface eventually) | Inline calls may still pass a literal message; keys are the declared path's default |
 | R9 | A **clock/locale seam** (`configure_clock`, tz-aware "today" per request context) + type coercion so datetime-vs-date compares instead of crashing | Same host-seam pattern as every other package |
@@ -177,16 +177,17 @@ enforce([
   coercion (never a 500 from a type mix).
 - Inline calls are the blessed 70% path: no catalog, no ceremony, one line.
 
-**Code/table boundary and signatures** (review round three, 2026-09-11):
+**Code/table boundary and signatures** (review rounds three and four,
+2026-09-11):
 
 - ``checks.register`` registers an *implementation* and stays in code —
   executable logic in a database row is unreviewable, untestable, and
   unauditable, and admins configure behavior, never author logic (the DR 0003
-  principle). Everything else is table-backed and hot-updatable with no
-  deployment: rule *applications* (which check applies to which fields),
-  ``params`` dials, messages, enabled/conditions — V-2/V-3 rows, TTL-cached,
-  audited. Genuinely new logic at runtime is exactly the CEL/JsonLogic
-  revisit trigger (§5): sandboxed expressions-as-data, never code-in-rows.
+  principle). **Round four descoped the table side entirely**: rule
+  applications and params also stay in code (they change rarely, and the
+  developer is updating logic anyway) — the package stays table-less, and
+  the runtime-dials idea returns only on demonstrated demand. Genuinely new
+  logic at runtime remains the CEL/JsonLogic revisit trigger (§5).
 - **Arguments**: a check takes ordered *values* (record data under test, one
   or many) and named *params* (configuration constants — the dials). Stored
   rules carry the identical split as ``bindings`` (ordered field refs) and
@@ -207,13 +208,13 @@ conditions)* — a stored call of a V-1 check. The four current kinds map 1:1;
 New: `conditions` — a flat AND-list of simple field predicates (the R11 slot);
 missing namespaced `context` fails loud (R10) unless the rule opts out.
 
-### V-3 Policy tier (opt-in module, own table + `migrate()`)
+### V-3 Policy tier — DESCOPED (review round four)
 
-`validation_rule_policy(rule_code, params_json, message_overrides, updated_at,
-updated_by, org_id nullable)` — deviation-only: a row exists only where an
-admin changed a dial. Resolution: DB row → code default. TTL-cached like the
-notifications policy tables. The base package remains table-less for hosts
-that never enable this.
+Removed from scope: params change rarely, and the cost (a table, a migrate,
+a cache, an admin surface) outweighs it. The signature-as-data registry means
+a future policy tier is a pure addition (params overrides only), so nothing
+is foreclosed. Revisit trigger: a real deployment asking to change a
+threshold without a release.
 
 ### V-4 Messages and localization
 
@@ -247,7 +248,7 @@ it. Unregistered entities flip from vacuously-known to fail-loud (R10).
 |---|---|---|
 | P1 | V-1 checks + clock seam + R10 fixes | R4, R9, R10, N2 |
 | P2 | V-2 bindings refactor + field derivation | R13, R11 (format), R1 |
-| P3 | V-3 policy tier + V-4 messages | R5, R8 |
+| P3 | V-4 messages (ar/en) | R8 |
 | P4 | V-5 endpoint v2 + JS evaluator; V-6 bulk | R6, R7, R12 |
 
 Each phase is one reviewable PR, dual-engine tested where DB-backed,
@@ -256,8 +257,7 @@ P2 is the one breaking refactor (pre-1.0 minor bump).
 
 ## 7. Open questions for review
 
-1. Does the policy tier live inside asas-validation (opt-in module, proposed)
-   or as a sibling package, given the base's table-less identity?
+1. ~~Policy tier placement~~ — resolved by descoping the tier (round four).
 2. `required_when` blurs into Pydantic's territory — include it (proposed,
    for the conditions story) or document the boundary as "shape is Pydantic,
    semantics are checks"?
