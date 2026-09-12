@@ -132,34 +132,42 @@ under test is always the first argument — each call reads aloud as the
 business rule it enforces. This grammar is also what the admin template
 dropdowns and plain-language rule rendering (R6/R11) inherit later.
 
-**One registry, two doors** (review rounds three and five): rules are
-*defined* in the registry (library built-ins plus host ``checks.register``)
-and *applied* through ``validate``, which every caller reaches by the door
-that suits it. The primary, human form is **attribute access** —
-``validate.after(a, b, days=3)`` — each built-in a real function, so the IDE
-autocompletes the name and shows the signature: what a check expects needs no
-description, the signature is the documentation. The equivalent **machine
-form** — ``validate("after", a, b, days=3)`` — serves callers holding the
-rule name as data (an agent reading ``checks.catalog()``, the client
-evaluator, a future stored rule); both forms hit the same dispatch, and
-host-registered checks appear as attributes too. Unknown names fail loud;
-``checks.catalog()`` self-describes the vocabulary for the dynamic callers.
+**Functions in a file, two doors** (rounds three, five, and seven —
+prototype-validated): there is no ``register()`` call. A check IS a plain
+function in a checks module: the library ships its built-ins that way, and a
+host adds its own by writing functions in its own checks file. The
+``validate`` namespace and ``checks.catalog()`` are **derived by reading the
+module** — the function's signature says what it takes, its docstring's first
+line is the human sentence — so nothing is declared twice and "define a
+check" means "write a function". The primary, human door is attribute
+access — ``validate.after(a, b, days=3)``, real functions, IDE-visible
+signatures. The machine door — ``validate("after", ...)`` — serves callers
+holding the name as data (an agent reading the catalog, the client
+evaluator); both doors reach the same functions. Unknown names fail loud.
+Evidence: working prototype (FastAPI + React interview form, 2026-09-12) —
+the derived namespace/catalog and one shared check list serving both a
+live-feedback endpoint and the save endpoint, ~40 lines of framework total.
 
 **Generic vocabulary only** (round five): the registry holds domain-free
 primitives — a check like ``interview_window`` is a design smell. Business
 meaning comes from *composing* generic checks at the call site (each
 violation then reports its own precise reason), and a recurring composite is
 wrapped in a plain host function returning a list of violations — ordinary
-code reuse, never a registry entry. ``enforce(list)`` drops the ``None``\ s
+code reuse, never a library entry. ``enforce(list)`` drops the ``None``\ s
 and raises one 422 carrying **all** remaining violations, so the user sees
 every error in one response instead of fixing them one resubmit at a time.
+The prototype's embedding pattern is the reference: one function returns the
+endpoint's check list; a ``/check`` endpoint enforces it without saving (live
+per-field form feedback) and the save endpoint enforces the same list before
+writing — same rules at both moments by construction.
 
 ```python
-from asas_validation import validate, enforce, checks
+# define: app/checks.py — a plain function; the docstring IS the sentence
+def iban(value, *, field="") -> Optional[Violation]:
+    """{field} must be a well-formed IBAN"""
+    ...
 
-# define (once, wiring module) — the "other place"
-checks.register("iban", valid_iban,     # generic, domain-free primitives only
-                description="value must be a well-formed IBAN")
+from asas_validation import validate, enforce
 
 # apply (anywhere) — business meaning by composition of generic checks
 enforce([
@@ -189,7 +197,7 @@ enforce([
 **Code/table boundary and signatures** (review rounds three and four,
 2026-09-11):
 
-- ``checks.register`` registers an *implementation* and stays in code —
+- A check is an *implementation* and stays in code —
   executable logic in a database row is unreviewable, untestable, and
   unauditable, and admins configure behavior, never author logic (the DR 0003
   principle). **Round four descoped the table side entirely**: rule
@@ -201,13 +209,13 @@ enforce([
   or many) and named *params* (configuration constants — the dials). Stored
   rules carry the identical split as ``bindings`` (ordered field refs) and
   ``params`` (JSON), so inline calls and table rows are the same information.
-- **Discoverability**: registration carries the signature as data — value
-  slots (name, type, description), params schema with defaults, and a
-  ``sentence`` template ("{value} must be after {reference} by {days}
-  day(s)"). ``checks.catalog()`` serves it to agents, docs, the rules
-  endpoint, and the future template dropdowns; ``validate()`` checks arity
-  and types and fails loud with the expected signature named in the error;
-  the sentence template is the R6/R11 plain-language rendering for free.
+- **Discoverability**: the signature as data is *derived*, never authored —
+  ``checks.catalog()`` introspects each function (parameter names, types,
+  defaults) and takes the sentence template from its docstring ("{value}
+  must be after {reference} by {days} day(s)"). It serves agents, docs, the
+  rules endpoint, and the future template dropdowns; a wrong-arity call
+  fails loud with the expected signature named in the error; the sentence
+  is the R6/R11 plain-language rendering for free.
 
 ### V-1a The shipped catalog (44 checks, review round six)
 
@@ -251,8 +259,8 @@ renamed into the grammar. Every check: values first, params named, a
 boundary stands); DB uniqueness/foreign-existence (a pure value check must
 not hold a query seam; host router code today, possible seam later — open
 question 5); authorization (asas-access); region-specific ids (Emirates ID
-etc. — violate generic-only; future opt-in regional packs via
-``checks.register``).
+etc. — violate generic-only; future opt-in regional packs as extra checks
+modules).
 
 ### V-2 Declared rules become stored bindings of checks
 
