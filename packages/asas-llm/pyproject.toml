@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asas-llm"
+version = "0.1.0"
+description = "Asas LLM module: prompts as data served registry-first with a last-good copy and a shipped local fallback, every model call traced and grouped per request with the trace id handed back, and strict-then-repair structured output from pydantic models."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+]
+dependencies = [
+    "pydantic>=2",
+    "json-repair>=0.30",
+]
+
+[project.optional-dependencies]
+# The prompt registry and trace backend. Pinned below 3: the 3.x SDK is a
+# different (OpenTelemetry-based) API and gets its own adapter when a host
+# needs it; the Tracer/PromptStore seams are what make that a local change.
+langfuse = [
+    "langfuse>=2.50,<3",
+]
+# The runner. LangChain 1.x is what the source engine runs; 0.3 also works
+# (the compat shim is a no-op there).
+langchain = [
+    "langchain-core>=0.3",
+]
+# The two model factories (OpenAI-compatible gateway, Azure OpenAI).
+openai = [
+    "langchain-openai>=0.3",
+]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+    "starlette>=0.37",
+    "langchain-core>=0.3",
+    "langfuse>=2.50,<3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/asas_llm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

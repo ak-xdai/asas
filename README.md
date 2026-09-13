@@ -74,7 +74,6 @@ Every Asas package holds to the same twelve principles, in no particular order:
 
 | Package | Import root | Contract variant |
 | --- | --- | --- |
-<<<<<<< HEAD
 | `asas-lookups` | `asas_lookups` | table-owning (DR 0017 pilot) |
 | `asas-validation` | `asas_validation` | table-less |
 | `asas-storage` | `asas_storage` | table-less, router-less |
@@ -85,24 +84,14 @@ Every Asas package holds to the same twelve principles, in no particular order:
 | `asas-notifications` | `asas_notifications` | table-owning + router |
 | `asas-search` | `asas_search` | dialect-branched chain (PG deep tier) |
 | `asas-mcp` | `asas_mcp` | protocol-only |
+| `asas-tenancy` | `asas_tenancy` | table-less, router-less (RLS helpers) |
+| `asas-audit` | `asas_audit` | table-owning + router (depends on `asas-tenancy`) |
+| `asas-llm` | `asas_llm` | AI tier: model calls, prompts, tracing (no tables) |
 | `asas-cli` | `asas_cli` | tooling |
 
 Packages version independently; the current version of each lives in its
 `CHANGELOG.md` and its `pyproject.toml`, tagged `<package>/vX.Y.Z` (see
 `RELEASING.md`).
-=======
-| `asas-lookups` | `asas_lookups` | table-owning: package Alembic chain (DR 0017 pilot) |
-| `asas-validation` | `asas_validation` | table-less contract variant |
-| `asas-storage` | `asas_storage` | table-less, router-less variant |
-| `asas-ratelimit` | `asas_ratelimit` | table-less, router-less variant |
-| `asas-jobs` | `asas_jobs` | table-owning: package Alembic chain |
-| `asas-access` | `asas_access` | table-owning: package Alembic chain |
-| `asas-workflow` | `asas_workflow` | table-owning: package Alembic chain |
-| `asas-notifications` | `asas_notifications` | table-owning + router variant |
-| `asas-search` | `asas_search` | dialect-branched chain: PG deep tier |
-| `asas-mcp` | `asas_mcp` | protocol-only variant |
-| `asas-tenancy` | `asas_tenancy` | table-less, router-less, chain-less variant |
-| `asas-audit` | `asas_audit` | table-owning + router variant (depends on `asas-tenancy`) |
 | `asas-cli` | `asas_cli` | developer CLI (`asas add`, `asas new`) — no host contract, install-time only |
 
 All ten planned modules are extracted (Teamy epic TEAMY-466, complete 2026-07-29);
@@ -120,7 +109,6 @@ Current versions are per package — see each package's `CHANGELOG.md`, and
 
 Every package exposes the same five-part surface — nothing more:
 
-<<<<<<< HEAD
 1. **`build_routers(get_session)`** — factory taking the host's FastAPI session
    dependency and returning the package's `APIRouter`s. Auth is
    composition-time: the host applies its own guards when including them;
@@ -148,21 +136,6 @@ Every package exposes the same five-part surface — nothing more:
 - **Per-package versioning**: each package tags and releases independently
   (`asas-lookups/v0.13.2`); pre-1.0, a breaking change bumps the minor. See
   `RELEASING.md`.
-=======
-| Package | Routers | Schema | Seeding | Host hooks |
-| --- | --- | --- | --- | --- |
-| `asas-lookups` | `build_routers` | `migrate` | `seed` | `configure_org_resolver` |
-| `asas-access` | — | `migrate` | `seed_field_permissions`, `seed_action_permissions`, `ensure_system_groups`, `ensure_clearance_levels` | — |
-| `asas-workflow` | — | `migrate` | `seed_workflow_definitions` | — |
-| `asas-notifications` | `build_router` | `migrate` | — | `configure_context_resolver`, `configure_recipient_filter` |
-| `asas-jobs` | — | `migrate` | `ensure_schedule` | `configure_context_binder`, `configure_runner` |
-| `asas-search` | — | `migrate` | — | — |
-| `asas-storage` | — | — | — | `configure` |
-| `asas-validation` | `build_router` | — | — | — |
-| `asas-ratelimit` | — | — | — | `configure` |
-| `asas-mcp` | `build_mcp_app` | — | — | — |
-| `asas-tenancy` | — | — | — | migration helpers (`enable_rls`, …) |
-| `asas-audit` | `build_router` | `migrate` | — | — |
 
 Reading the table:
 

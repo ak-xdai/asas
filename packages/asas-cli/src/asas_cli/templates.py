@@ -191,6 +191,20 @@ SNIPPETS: dict[str, BootSnippet] = {
             "# Postgres-only DDL; SQLite records the version and creates nothing",
         ),
     ),
+    "llm": BootSnippet(
+        imports=("import asas_llm", "import asas_llm.middleware", "from pathlib import Path"),
+        setup=(
+            "asas_llm.configure(\n"
+            '    prompts=asas_llm.LocalPromptStore(Path("./prompts")),  '
+            "# TODO: asas_llm.LayeredPromptStore(asas_llm.langfuse.LangfusePromptStore(client), asas_llm.LocalPromptStore(...)) in prod\n"
+            "    model_factory=lambda model, options: None,  "
+            "# TODO: asas_llm.runners.openai_compatible(api_key=..., base_url=...) or azure_openai(...)\n"
+            '    default_model="gpt-4o-mini",  # TODO: your default model\n'
+            "    # tracer=asas_llm.langfuse.LangfuseTracer(client),  # TODO: only with Langfuse; NullTracer otherwise\n"
+            ")",
+            "app.add_middleware(asas_llm.middleware.TraceIdMiddleware)  # X-Correlation-Id in, X-Trace-Id out",
+        ),
+    ),
     "mcp": BootSnippet(
         imports=("import asas_mcp", "from starlette.routing import Route"),
         setup=(

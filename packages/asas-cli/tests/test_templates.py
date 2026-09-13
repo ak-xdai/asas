@@ -26,7 +26,7 @@ def test_table_owning_packages_call_migrate_in_boot():
 
 
 def test_table_less_packages_have_no_boot_lines():
-    table_less = {"validation", "storage", "ratelimit", "mcp"}
+    table_less = {"validation", "storage", "ratelimit", "mcp", "llm"}
     for key in table_less:
         assert SNIPPETS[key].boot == (), key
 
@@ -39,7 +39,7 @@ def test_router_packages_include_a_router_in_setup():
 
 
 def test_router_less_packages_never_include_a_router():
-    router_less = {"storage", "ratelimit", "jobs", "access", "workflow", "search"}
+    router_less = {"storage", "ratelimit", "jobs", "access", "workflow", "search", "llm"}
     for key in router_less:
         setup_text = "\n".join(SNIPPETS[key].setup)
         assert "include_router" not in setup_text, key
