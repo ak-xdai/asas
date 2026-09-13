@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asas-validation"
-version = "0.11.0"
+version = "0.12.0"
 description = "Asas validation module: declarative temporal/cross-field rules evaluated on both create and update, with a FastAPI endpoint serving the rule set so clients enforce the same constraints."
 readme = "README.md"
 requires-python = ">=3.11"

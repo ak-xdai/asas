@@ -4,11 +4,13 @@ resets both so tests never leak into each other."""
 
 import pytest
 
-from asas_validation import catalog, declare_rules
+from asas_validation import configure_clock, declare_rules
+from asas_validation import fields as _fields
 
 
 @pytest.fixture(autouse=True)
 def _reset_registries():
     yield
     declare_rules(())
-    catalog._FIELDS.clear()
+    _fields._FIELDS.clear()
+    configure_clock(None)
