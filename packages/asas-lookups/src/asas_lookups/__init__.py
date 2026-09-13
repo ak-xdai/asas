@@ -12,6 +12,9 @@ Public surface — the Asas host contract:
 - :func:`configure_org_resolver` — optional multi-tenancy hook (how to read the
   acting org off a session). Unconfigured ⇒ single-tenant: global rows only.
 - :func:`seed` — idempotent starter reference data; call at boot after ``migrate``.
+- :func:`seed_file` — the same, for a HOST's own vocabulary in its own JSON file.
+- :class:`OrmSeeder` — the same four tables written through the ORM's object
+  graph instead, on SQLite. See ``orm_seeding`` for why both exist.
 - :func:`migrate` — package-owned Alembic chain, adopt-or-create; call at boot.
 - ``service`` — query/resolve/admin functions taking an explicit ``Session``.
 """
@@ -19,10 +22,12 @@ Public surface — the Asas host contract:
 from .migrate import migrate
 from .models import TypeScope  # noqa: F401
 from .router import Routers, build_routers
+from .orm_seeding import Inspector, OrmSeeder, SeedReport  # noqa: F401
 from .seeding import (  # noqa: F401
     bump_version_if,
     ensure_type,
     ensure_value,
+    seed_file,
     seed_lookups as seed,
     seed_org_lookups,
 )
@@ -31,6 +36,9 @@ from .service import configure_org_resolver, find_org_shadows
 __version__ = "0.13.2"
 
 __all__ = [
+    "Inspector",
+    "OrmSeeder",
+    "SeedReport",
     "Routers",
     "TypeScope",
     "__version__",
@@ -42,5 +50,6 @@ __all__ = [
     "find_org_shadows",
     "migrate",
     "seed",
+    "seed_file",
     "seed_org_lookups",
 ]
