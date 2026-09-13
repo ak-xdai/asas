@@ -4,13 +4,16 @@ Run on startup (after ``migrate``). Safe to call repeatedly: types are matched b
 and values by ``code`` within a type, so nothing is duplicated.
 """
 
-from typing import Any, Optional
+from datetime import date
+from pathlib import Path
+from typing import Any, Optional, Sequence, Tuple, Union
 
 from sqlmodel import Session, select
 
-from .data.countries import COUNTRIES
+from .data import SeedType, load, types
 from .models import (
     LookupAlias,
+    LookupStatus,
     LookupTranslation,
     LookupType,
     LookupValue,
@@ -18,70 +21,6 @@ from .models import (
     TypeScope,
 )
 
-# Closed (admin-managed) lists. Each value: code, en, ar.
-_SALUTATION = [
-    ("mr", "Mr.", "السيد"),
-    ("mrs", "Mrs.", "السيدة"),
-    ("ms", "Ms.", "الآنسة/السيدة"),
-    ("miss", "Miss", "الآنسة"),
-    ("dr", "Dr.", "الدكتور"),
-    ("prof", "Prof.", "الأستاذ"),
-    ("eng", "Eng.", "المهندس"),
-    ("sheikh", "Sheikh", "الشيخ"),
-    ("sir", "Sir", "سير"),
-]
-
-# Salutations that appear in the member's display name ("Dr. Jane"); everyday honorifics
-# (mr/mrs/…) stay form-only. Seeded as `show_in_name` meta, backfilled only while the key
-# is absent — an admin's explicit true/false edit is never overwritten.
-_SALUTATION_IN_NAME = ("dr", "prof", "eng", "sheikh", "sir")
-
-_GENDER = [
-    ("male", "Male", "ذكر"),
-    ("female", "Female", "أنثى"),
-    ("other", "Other", "آخر"),
-]
-
-_MARITAL = [
-    ("single", "Single", "أعزب"),
-    ("married", "Married", "متزوج"),
-    ("divorced", "Divorced", "مطلّق"),
-    ("widowed", "Widowed", "أرمل"),
-]
-
-# Salary currencies (WXL-180) — closed list, ISO 4217 codes; AED first (the default).
-_CURRENCY = [
-    ("AED", "UAE Dirham", "درهم إماراتي"),
-    ("USD", "US Dollar", "دولار أمريكي"),
-    ("EUR", "Euro", "يورو"),
-    ("GBP", "Pound Sterling", "جنيه إسترليني"),
-    ("SAR", "Saudi Riyal", "ريال سعودي"),
-    ("QAR", "Qatari Riyal", "ريال قطري"),
-    ("KWD", "Kuwaiti Dinar", "دينار كويتي"),
-    ("BHD", "Bahraini Dinar", "دينار بحريني"),
-    ("OMR", "Omani Rial", "ريال عماني"),
-    ("EGP", "Egyptian Pound", "جنيه مصري"),
-    ("INR", "Indian Rupee", "روبية هندية"),
-]
-
-# Contract / engagement type (how the org engages a person). Synonyms are seeded as
-# aliases so search resolves "staff aug", "SOW", "contractor", … to the right code.
-# Each value: code, en, ar, aliases.
-# Social platforms (WXL-198) — closed list backing member_social.platform_code. A new
-# platform is a lookup row, not a migration. Each value: code, en, ar.
-# Emergency-contact relationship (WXL-198) — closed list. Each value: code, en, ar.
-# Project health (RAG) — a closed list. ``meta.tone`` drives the badge color in the UI,
-# so admins can add or recolor values without a code change. Each value: code, en, ar, tone.
-# Work-item statuses (WXL-203) — closed, admin-extensible list. ``meta.category`` is the
-# FIXED engine vocabulary (backlog|unstarted|started|completed|canceled) that drives board
-# columns, rollups and lifecycle timestamps; ``meta.tone`` the badge color. Admins may add
-# or rename statuses freely (vocabulary); the engine keys only on category — the one idea
-# Linear, Jira, Asana and Azure DevOps all converge on (docs/src/content/docs/architecture/decisions/0008-work-items.md §4.2).
-# Each value: code, en, ar, category, tone.
-# Work-item types (WXL-203) — closed but admin-extensible; seeded with the generic `task`
-# only (no dev jargon like bug/story — owner decision 2026-07-09). Type NEVER drives
-# behavior; it's classification vocabulary.
-# Risk & issue register categories — closed, admin-managed lists. Each value: code, en, ar.
 
 def ensure_type(
     session: Session,
@@ -269,6 +208,11 @@ def seed_org_lookups(session: Session, org_id: int) -> int:
     return created
 
 
+#: One alias as seeded: a bare string means "any language", a pair pins it to one.
+#: The bare form is kept because it is what every existing caller passes.
+AliasSpec = Union[str, Tuple[str, Optional[str]]]
+
+
 def ensure_value(
     session: Session,
     type_id: int,
@@ -276,14 +220,29 @@ def ensure_value(
     translations: list[tuple[str, str]],
     *,
     sort_order: int = 0,
-    aliases: Optional[list[str]] = None,
+    aliases: Optional[Sequence[AliasSpec]] = None,
     meta: Optional[dict] = None,
+    short_labels: Optional[dict[str, str]] = None,
+    is_default: bool = False,
+    status: Optional[LookupStatus | str] = None,
+    valid_from: Optional[date] = None,
+    valid_to: Optional[date] = None,
 ) -> bool:
     """Create the value + translations + aliases if it doesn't already exist.
 
     Returns True if seeding changed anything (new value inserted, or a label-less
     value healed), False otherwise — callers use this to know whether to bump the
     type ``version`` (which busts read-API ETags).
+
+    Every keyword after ``translations`` writes a column of ``lookup_value`` (or
+    of its translation rows) and applies **on insert only**: an existing value is
+    never rewritten, so a deployment's own edits survive re-seeding. The two
+    self-referencing columns, ``parent_id`` and ``superseded_by_id``, are not
+    here — they point at other values by code, which is a resolution the caller
+    has to do once every row exists (see ``_link_pass``).
+
+    ``short_labels`` is a separate mapping rather than a third tuple element so
+    the ``list[(lang, label)]`` shape every existing caller passes keeps working.
     """
     # Platform rows only (issue #24; DR 0001 T7): the seed runs with no org
     # context and owns only org-less rows — an org-minted row with the same
@@ -307,34 +266,71 @@ def ensure_value(
         # between inserting the value and its labels (pre-fix two-commit window).
         # Backfill labels + aliases; values with any labels are never touched,
         # so admin label edits survive.
-        for lang, label in translations:
-            session.add(
-                LookupTranslation(value_id=existing.id, lang=lang, label=label)
-            )
+        _add_translations(session, existing.id, translations, short_labels)
         present = {
             a.alias
             for a in session.exec(
                 select(LookupAlias).where(LookupAlias.value_id == existing.id)
             )
         }
-        for alias in aliases or []:
+        for alias, lang in _alias_pairs(aliases):
             if alias not in present:
-                session.add(LookupAlias(value_id=existing.id, alias=alias))
+                session.add(
+                    LookupAlias(value_id=existing.id, alias=alias, lang=lang)
+                )
         session.commit()
         return True
     value = LookupValue(
-        type_id=type_id, code=code, sort_order=sort_order, meta=meta or {}
+        type_id=type_id,
+        code=code,
+        sort_order=sort_order,
+        meta=meta or {},
+        is_default=is_default,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        **({"status": LookupStatus(status)} if status is not None else {}),
     )
     session.add(value)
     # flush (not commit) assigns value.id while keeping value + translations +
     # aliases in one transaction — a crash mid-seed can't strand a bare value.
     session.flush()
-    for lang, label in translations:
-        session.add(LookupTranslation(value_id=value.id, lang=lang, label=label))
-    for alias in aliases or []:
-        session.add(LookupAlias(value_id=value.id, alias=alias))
+    _add_translations(session, value.id, translations, short_labels)
+    for alias, lang in _alias_pairs(aliases):
+        session.add(LookupAlias(value_id=value.id, alias=alias, lang=lang))
     session.commit()
     return True
+
+
+def _alias_pairs(
+    aliases: Optional[Sequence[AliasSpec]],
+) -> list[tuple[str, Optional[str]]]:
+    """Normalise the two accepted alias shapes to ``(alias, lang)``."""
+    out: list[tuple[str, Optional[str]]] = []
+    for spec in aliases or []:
+        if isinstance(spec, str):
+            out.append((spec, None))
+        else:
+            alias, lang = spec
+            out.append((alias, lang))
+    return out
+
+
+def _add_translations(
+    session: Session,
+    value_id: int,
+    translations: list[tuple[str, str]],
+    short_labels: Optional[dict[str, str]],
+) -> None:
+    short = short_labels or {}
+    for lang, label in translations:
+        session.add(
+            LookupTranslation(
+                value_id=value_id,
+                lang=lang,
+                label=label,
+                short_label=short.get(lang),
+            )
+        )
 
 
 def bump_version_if(session: Session, type_: LookupType, added: int) -> None:
@@ -346,126 +342,171 @@ def bump_version_if(session: Session, type_: LookupType, added: int) -> None:
         session.commit()
 
 
-def seed_lookups(session: Session) -> None:
-    # --- Closed lists (curated order) ---
-    salutation = ensure_type(
+def _seed_type(session: Session, spec: SeedType) -> None:
+    """Seed one type from the file: the ``lookup_type`` row, then its values.
+
+    Two behaviours the hand-written per-type blocks carried are kept and
+    generalised:
+
+    * **Curated order** -- a value that names its own ``sort_order`` gets it. One
+      that does not takes the array index when the type is sorted by
+      ``sort_order``, so the order a reader sees in the file is the order the API
+      returns, and 0 when the type is sorted by label, where nothing reads it.
+    * **Meta backfill** -- ``meta`` reaches a NEW row through ``ensure_value``, but
+      an existing row is only ever topped up with keys it does not already have.
+      That rule arrived for the salutations' ``show_in_name`` flag, added after
+      those rows had shipped, and it is a backfill rather than a write because an
+      admin's explicit ``true``/``false`` must survive the next boot.
+    """
+    type_ = ensure_type(
         session,
-        key="salutation",
-        name="Salutation",
-        code_system="internal",
-        default_sort=SortMode.sort_order,
+        key=spec.key,
+        name=spec.name,
+        description=spec.description,
+        code_system=spec.code_system,
+        default_sort=SortMode(spec.default_sort or SortMode.label),
+        scope=TypeScope(spec.scope) if spec.scope else None,
+        is_open=spec.is_open,
+        is_hierarchical=spec.is_hierarchical,
     )
-    added = sum(
-        ensure_value(
-            session, salutation.id, code, [("en", en), ("ar", ar)], sort_order=i
+    curated = type_.default_sort == SortMode.sort_order
+    changed = 0
+
+    for index, value in enumerate(spec.values):
+        order = value.sort_order
+        if order is None:
+            order = index if curated else 0
+        wrote = ensure_value(
+            session,
+            type_.id,
+            value.code,
+            [(t["lang"], t["label"]) for t in value.translations],
+            sort_order=order,
+            aliases=[(a["alias"], a.get("lang")) for a in value.aliases],
+            meta=value.meta,
+            short_labels={
+                t["lang"]: t["short_label"]
+                for t in value.translations
+                if t.get("short_label")
+            },
+            is_default=value.is_default,
+            status=value.status,
+            valid_from=_as_date(value.valid_from),
+            valid_to=_as_date(value.valid_to),
         )
-        for i, (code, en, ar) in enumerate(_SALUTATION)
-    )
-    flagged = 0
-    for code in _SALUTATION_IN_NAME:
-        v = session.exec(
+        changed += wrote
+        # Only a row this seed did NOT just write can be short of a meta key, and
+        # only when an older release of the file lacked it. Skipping the probe
+        # otherwise keeps seeding at one query per value rather than two.
+        if value.meta and not wrote:
+            changed += _backfill_meta(session, type_.id, value.code, value.meta)
+
+    changed += _link_pass(session, type_.id, spec)
+    bump_version_if(session, type_, changed)
+
+
+def _link_pass(session: Session, type_id: int, spec: SeedType) -> int:
+    """Second pass: resolve ``parent_code`` and ``superseded_by`` to row ids.
+
+    Runs after every value of the type exists, so a file may name a parent that
+    appears later in the array, or a replacement further down. Both pointers are
+    filled **only while NULL** -- the same rule as the meta backfill, and for the
+    same reason: a row an admin has re-parented must not be moved back at the next
+    boot.
+    """
+    wanted = {
+        v.code: (v.parent_code, v.superseded_by)
+        for v in spec.values
+        if v.parent_code or v.superseded_by
+    }
+    if not wanted:
+        return 0
+
+    rows = {
+        r.code: r
+        for r in session.exec(
             select(LookupValue).where(
-                LookupValue.type_id == salutation.id,
-                LookupValue.code == code,
-                LookupValue.org_id.is_(None),  # the seed owns platform rows only
+                LookupValue.type_id == type_id, LookupValue.org_id.is_(None)
             )
-        ).first()
-        if v is not None and "show_in_name" not in (v.meta or {}):
-            v.meta = {**(v.meta or {}), "show_in_name": True}
-            session.add(v)
-            flagged += 1
-    if flagged:
+        )
+    }
+    changed = 0
+    for code, (parent_code, superseded_code) in wanted.items():
+        row = rows.get(code)
+        if row is None:
+            continue
+        for field, target_code in (
+            ("parent_id", parent_code),
+            ("superseded_by_id", superseded_code),
+        ):
+            if not target_code or getattr(row, field) is not None:
+                continue
+            target = rows.get(target_code)
+            if target is None:
+                raise ValueError(
+                    f"{spec.key}:{code} points at {target_code!r}, which this "
+                    "type has no value for"
+                )
+            setattr(row, field, target.id)
+            session.add(row)
+            changed = 1
+    if changed:
         session.commit()
-    bump_version_if(session, salutation, added + flagged)
+    return changed
 
-    gender = ensure_type(
-        session,
-        key="gender",
-        name="Gender",
-        code_system="internal",
-        default_sort=SortMode.sort_order,
-    )
-    added = sum(
-        ensure_value(session, gender.id, code, [("en", en), ("ar", ar)], sort_order=i)
-        for i, (code, en, ar) in enumerate(_GENDER)
-    )
-    bump_version_if(session, gender, added)
 
-    marital = ensure_type(
-        session,
-        key="marital_status",
-        name="Marital status",
-        code_system="internal",
-        default_sort=SortMode.sort_order,
-    )
-    added = sum(
-        ensure_value(session, marital.id, code, [("en", en), ("ar", ar)], sort_order=i)
-        for i, (code, en, ar) in enumerate(_MARITAL)
-    )
-    bump_version_if(session, marital, added)
+def _as_date(raw: Optional[str]) -> Optional[date]:
+    """An ISO date from the file, or None. Validated at load, so this only parses."""
+    return date.fromisoformat(raw) if raw else None
 
-    currency = ensure_type(
-        session,
-        key="currency",
-        name="Currency",
-        code_system="iso4217",
-        default_sort=SortMode.sort_order,
-    )
-    added = sum(
-        ensure_value(
-            session, currency.id, code, [("en", en), ("ar", ar)], sort_order=i
+
+def _backfill_meta(session: Session, type_id: int, code: str, meta: dict) -> int:
+    """Add absent ``meta`` keys to an already-seeded platform row. Never overwrite.
+
+    Returns 1 if anything was added, so the caller bumps the type version and the
+    read-API ETag changes for clients holding the old list.
+    """
+    row = session.exec(
+        select(LookupValue).where(
+            LookupValue.type_id == type_id,
+            LookupValue.code == code,
+            LookupValue.org_id.is_(None),  # the seed owns platform rows only
         )
-        for i, (code, en, ar) in enumerate(_CURRENCY)
-    )
-    bump_version_if(session, currency, added)
+    ).first()
+    if row is None:
+        return 0
+    current = row.meta or {}
+    missing = {k: v for k, v in meta.items() if k not in current}
+    if not missing:
+        return 0
+    row.meta = {**current, **missing}
+    session.add(row)
+    session.commit()
+    return 1
 
-    # Project roles were an open lookup type here from TEAMY-291 until TEAMY-487
-    # promoted them to a first-class `project_role` entity in the host (Teamy) —
-    # the seed is retired; hosts adopt any surviving lookup values into their own
-    # catalog at boot (idempotent) and this library never re-creates the type.
-    #
-    # TEAMY-803 took that further: seventeen types that were either a host's
-    # domain objects (work items, project health, risks) or a value set someone
-    # chose rather than one the world agrees on (contract types, social
-    # platforms, next-of-kin relationships, and the open CV vocabularies) left
-    # for the same reason. What remains below is standards-based or near-
-    # universal to any people system. A host's own words belong to the host —
-    # the library seeding them meant a second host inherited the first one's
-    # product vocabulary without asking.
 
-    # --- Countries & nationalities (alphabetical, ISO codes) ---
-    country = ensure_type(
-        session,
-        key="country",
-        name="Country",
-        code_system="ISO3166-1A2",
-        default_sort=SortMode.label,
-    )
-    nationality = ensure_type(
-        session,
-        key="nationality",
-        name="Nationality",
-        code_system="ISO3166-1A2",
-        default_sort=SortMode.label,
-    )
-    country_added = 0
-    nationality_added = 0
-    for c in COUNTRIES:
-        country_added += ensure_value(
-            session,
-            country.id,
-            c["code"],
-            [("en", c["country_en"]), ("ar", c["country_ar"])],
-            aliases=c["aliases"],
-            meta={"iso2": c["code"]},
-        )
-        nationality_added += ensure_value(
-            session,
-            nationality.id,
-            c["code"],
-            [("en", c["nat_en"]), ("ar", c["nat_ar"])],
-            aliases=c["aliases"],
-            meta={"iso2": c["code"]},
-        )
-    bump_version_if(session, country, country_added)
-    bump_version_if(session, nationality, nationality_added)
+def seed_lookups(session: Session) -> None:
+    """Seed every type shipped in ``asas_lookups/data/seed.json``.
+
+    What is shipped is standards-based or near-universal to any people system:
+    salutation, gender, marital status, currency, country, nationality. A host's
+    own words belong to the host -- TEAMY-803 removed seventeen types that were
+    either a host's domain objects or a value set someone had merely chosen,
+    because a second host was inheriting the first one's product vocabulary
+    without asking. Seed your own with ``seed_file``.
+    """
+    for spec in types():
+        _seed_type(session, spec)
+
+
+def seed_file(session: Session, path: str | Path) -> None:
+    """Seed a HOST's own vocabulary from a file in the same shape as ``seed.json``.
+
+    The README has always told hosts their product's words are theirs to seed, and
+    then offered only ``ensure_type`` / ``ensure_value`` -- so every adopting host
+    writes the same loop over the same Python literals, which is the shape this
+    package just moved its own data out of. This is that loop, once, with the file
+    validated on the way in.
+    """
+    for spec in load(Path(path)):
+        _seed_type(session, spec)
