@@ -102,7 +102,15 @@ def configure() -> None:
     # Delivery channel. The logging adapter is the package's own, and is the
     # honest default for a reference host: a real one registers an email or chat
     # adapter here, and that is the only line that changes.
-    notifications.register_adapter("log", notifications.LoggingAdapter())
+    # **The NAME has to be the one routing resolves.** With no policy rows
+    # seeded, 0.16's fallback routes normal/high emits to the channel called
+    # "email"; an adapter registered under any other name is never found —
+    # dispatch_pending writes the outbox row, resolves no adapter, and marks
+    # it `skipped` ("no adapter registered for channel"), silently. The
+    # logging adapter therefore registers AS the email channel here; a real
+    # host swaps the adapter object and changes nothing else.
+    # (Re-creates PR #41 by @ignacio-galindo against the 0.16 wiring.)
+    notifications.register_adapter("email", notifications.LoggingAdapter())
 
 
 def seed(session: Session) -> None:
