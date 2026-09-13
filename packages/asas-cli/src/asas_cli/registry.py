@@ -130,6 +130,12 @@ _SPECS = [
         "Append-only hash-chained audit log that commits with the change it "
         "describes, with a verification report.",
         "table-owning + router",
+        "graph",
+        "asas-graph",
+        "asas_graph",
+        "packages/asas-graph",
+        "App-only Microsoft Graph client with typed errors; create/reschedule/cancel Teams meetings.",
+        "table-less, router-less (AI tier)",
     ),
 ]
 

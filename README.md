@@ -87,6 +87,7 @@ Every Asas package holds to the same twelve principles, in no particular order:
 | `asas-tenancy` | `asas_tenancy` | table-less, router-less (RLS helpers) |
 | `asas-audit` | `asas_audit` | table-owning + router (depends on `asas-tenancy`) |
 | `asas-llm` | `asas_llm` | AI tier: model calls, prompts, tracing (no tables) |
+| `asas-graph` | `asas_graph` | app-only Microsoft Graph client + Teams meetings (no tables) |
 | `asas-cli` | `asas_cli` | tooling |
 
 Packages version independently; the current version of each lives in its

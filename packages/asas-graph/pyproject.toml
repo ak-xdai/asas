@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asas-graph"
+version = "0.1.0"
+description = "Asas Microsoft Graph module: an app-only (client-credentials) Graph client with typed errors and the certificate trust-store problem solved, plus create/reschedule/cancel of Teams meetings on an organiser's calendar."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+]
+dependencies = [
+    "httpx>=0.27,<1",
+    "msal>=1.28,<2",
+    "certifi>=2024.2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/asas_graph"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

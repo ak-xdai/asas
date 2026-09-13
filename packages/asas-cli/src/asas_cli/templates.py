@@ -203,6 +203,27 @@ SNIPPETS: dict[str, BootSnippet] = {
             "    # tracer=asas_llm.langfuse.LangfuseTracer(client),  # TODO: only with Langfuse; NullTracer otherwise\n"
             ")",
             "app.add_middleware(asas_llm.middleware.TraceIdMiddleware)  # X-Correlation-Id in, X-Trace-Id out",
+    "graph": BootSnippet(
+        imports=("import functools", "import asas_graph"),
+            "@functools.cache  # ONE client per process: fresh clients per call would\n"
+            "def graph_client() -> asas_graph.GraphClient:  # re-pay the token round trip\n"
+            "    # Built on first use so an unconfigured scaffold still boots; an empty\n"
+            "    # tenant/client/secret fails loud here with GraphConfigError.\n"
+            "    # Close at shutdown: await graph_client().aclose() in your lifespan hook.\n"
+            "    return asas_graph.GraphClient(asas_graph.GraphSettings(\n"
+            "        tenant_id=settings.graph_tenant_id,\n"
+            "        client_id=settings.graph_client_id,\n"
+            "        client_secret=settings.graph_client_secret,\n"
+            "    ))",
+            "# teams = asas_graph.TeamsMeetings(graph_client(), organizer=settings.graph_organizer)",
+            "# await teams.create(subject, start, end, attendees=[asas_graph.Attendee(email)])  "
+            "# TODO: needs Calendars.ReadWrite (application), admin-consented",
+        ),
+        settings_fields=(
+            ("graph_tenant_id", "str", '""'),
+            ("graph_client_id", "str", '""'),
+            ("graph_client_secret", "str", '""'),
+            ("graph_organizer", "str", '""'),
         ),
     ),
     "mcp": BootSnippet(

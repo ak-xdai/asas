@@ -39,8 +39,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [asas-lookups, asas-validation, asas-storage, asas-ratelimit, asas-jobs, asas-access, asas-workflow, asas-notifications, asas-search, asas-mcp, asas-tenancy, asas-audit]
-        package: [asas-lookups, asas-validation, asas-storage, asas-ratelimit, asas-jobs, asas-access, asas-workflow, asas-notifications, asas-search, asas-mcp, asas-llm]
+        package: [asas-lookups, asas-validation, asas-storage, asas-ratelimit, asas-jobs, asas-access, asas-workflow, asas-notifications, asas-search, asas-mcp, asas-tenancy, asas-audit, asas-llm, asas-graph]
+        # asas-graph touches no database (same rule as asas-cli): one leg,
+        # not an identical suite twice plus an unused postgres service.
+        exclude:
+          - package: asas-graph
+            engine: postgres
         engine: [sqlite, postgres]
 
     services:
