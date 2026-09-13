@@ -127,9 +127,9 @@ def _assert_adoptable(inspector) -> None:
         # slip the checks around this one, and stamping would replay the chain
         # and crash raw on the pair that already moved, far from the cause.
         raise RuntimeError(
-            f"asas-notifications cannot adopt the existing {{_SENTINEL_TABLE!r}} table: its columns are "
-            f"PARTIALLY renamed ({{sorted(renamed)}} moved, "
-            f"{{sorted(set(_RENAMED_PAIRS) - set(renamed))}} did not). Finish or revert "
+            f"asas-notifications cannot adopt the existing {_SENTINEL_TABLE!r} table: its columns are "
+            f"PARTIALLY renamed ({sorted(renamed)} moved, "
+            f"{sorted(set(_RENAMED_PAIRS) - set(renamed))} did not). Finish or revert "
             f"the half-applied rename (restore from backup, or apply the missing "
             f"renames by hand), then re-run migrate()."
         )

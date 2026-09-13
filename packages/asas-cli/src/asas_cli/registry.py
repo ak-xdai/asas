@@ -105,6 +105,24 @@ _SPECS = [
         "Remote MCP server core (exposes the host to AI clients over MCP).",
         "protocol-only",
     ),
+    PackageSpec(
+        "tenancy",
+        "asas-tenancy",
+        "asas_tenancy",
+        "packages/asas-tenancy",
+        "Tenant isolation enforced by Postgres RLS: context, session GUC, "
+        "migration helpers, conformance kit.",
+        "table-less, router-less, chain-less",
+    ),
+    PackageSpec(
+        "audit",
+        "asas-audit",
+        "asas_audit",
+        "packages/asas-audit",
+        "Append-only hash-chained audit log that commits with the change it "
+        "describes, with a verification report.",
+        "table-owning + router",
+    ),
 ]
 
 PACKAGES: dict[str, PackageSpec] = {spec.key: spec for spec in _SPECS}

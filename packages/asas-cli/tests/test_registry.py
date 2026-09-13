@@ -13,6 +13,8 @@ EXPECTED_KEYS = {
     "notifications",
     "search",
     "mcp",
+    "tenancy",
+    "audit",
 }
 
 

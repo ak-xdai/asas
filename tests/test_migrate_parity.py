@@ -1,4 +1,4 @@
-"""The six ``migrate.py`` files must stay byte-identical modulo per-package data.
+"""The seven ``migrate.py`` files must stay byte-identical modulo per-package data.
 
 Every table-owning package carries its own copy of the adopt-or-create migration
 runner. That duplication is a **deliberate standing choice** (Teamy TEAMY-798,
@@ -15,7 +15,7 @@ while the other five said *alongside*. DR 0017 §4 was corrected during the
 pilot; that one docstring never was, so the oldest copy documented the opposite
 of what every host actually does.
 
-If this test fails, the fix is to apply your change to **all six** files — not
+If this test fails, the fix is to apply your change to **all seven** files — not
 to loosen the normalisation. The only thing that may join the normalised set is
 genuinely per-package *data* — the identity of the package and the shape of the
 schema it owns. Logic and prose must stay identical, which is the whole point.
@@ -65,9 +65,9 @@ def normalise(path: pathlib.Path) -> str:
     return text
 
 
-def test_all_six_packages_are_present():
+def test_all_table_owning_packages_are_present():
     """A new table-owning package silently skipping this test would defeat it."""
-    assert len(MIGRATES) == 6, f"expected 6 migrate.py files, found {len(MIGRATES)}: {MIGRATES}"
+    assert len(MIGRATES) == 7, f"expected 7 migrate.py files, found {len(MIGRATES)}: {MIGRATES}"
 
 
 @pytest.mark.parametrize("path", MIGRATES[1:], ids=_package_of)
@@ -85,5 +85,5 @@ def test_matches_the_reference_copy(path):
         pytest.fail(
             f"{_package_of(path)}/migrate.py has drifted from "
             f"{_package_of(reference)}/migrate.py.\n"
-            f"Apply the change to all six copies (see this module's docstring).\n\n{diff}"
+            f"Apply the change to all seven copies (see this module's docstring).\n\n{diff}"
         )

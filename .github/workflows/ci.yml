@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [asas-lookups, asas-validation, asas-storage, asas-ratelimit, asas-jobs, asas-access, asas-workflow, asas-notifications, asas-search, asas-mcp]
+        package: [asas-lookups, asas-validation, asas-storage, asas-ratelimit, asas-jobs, asas-access, asas-workflow, asas-notifications, asas-search, asas-mcp, asas-tenancy, asas-audit]
         engine: [sqlite, postgres]
 
     services:
@@ -92,6 +92,37 @@ jobs:
           docker logs azurite >&2
           exit 1
 
+      # asas-tenancy and asas-audit both assert that Postgres row-level security
+      # actually isolates, and the service container's POSTGRES_USER is a
+      # SUPERUSER, which ignores RLS with FORCE set. Run as that role and every
+      # isolation assertion would pass on a completely unprotected database,
+      # which is the exact failure these packages exist to prevent. So those legs
+      # get their own NOBYPASSRLS role, and a database it OWNS (both suites
+      # recreate the public schema per test).
+      - name: Provision the restricted RLS role
+        if: (matrix.package == 'asas-tenancy' || matrix.package == 'asas-audit') && matrix.engine == 'postgres'
+        env:
+          PGPASSWORD: asas
+        run: |
+          psql -h localhost -U asas -d asas_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE asas_rls LOGIN PASSWORD 'asas_rls' NOSUPERUSER NOBYPASSRLS;
+          SQL
+          createdb -h localhost -U asas -O asas_rls asas_rls_test
+          psql -h localhost -U asas -d asas_rls_test -v ON_ERROR_STOP=1 \
+            -c "ALTER SCHEMA public OWNER TO asas_rls;"
+          # Prove the role is what we think it is before the suite trusts it.
+          PGPASSWORD=asas_rls psql -h localhost -U asas_rls -d asas_rls_test -tAc \
+            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user" \
+            | grep -qx f || { echo "asas_rls can bypass RLS; the suite would prove nothing" >&2; exit 1; }
+
+      # asas-audit depends on asas-tenancy BY NAME (see the repo README): there is
+      # no package index, so the sibling is installed from its local path first
+      # and pip's name-only requirement is then already satisfied. This is the
+      # same shape a consumer uses, where their own top-level git pin satisfies it.
+      - name: Install sibling packages
+        if: matrix.package == 'asas-audit'
+        run: pip install -e packages/asas-tenancy
+
       - name: Install package
         working-directory: packages/${{ matrix.package }}
         run: pip install -e '.[dev]'
@@ -99,11 +130,18 @@ jobs:
       - name: Run tests
         working-directory: packages/${{ matrix.package }}
         env:
-          TEST_DATABASE_URL: ${{ matrix.engine == 'postgres' && 'postgresql+psycopg2://asas:asas@localhost:5432/asas_test' || '' }}
+          # asas-tenancy and asas-audit connect as the restricted role provisioned
+          # above; every other package connects as the service's own user.
+          TEST_DATABASE_URL: ${{ matrix.engine == 'postgres' && ((matrix.package == 'asas-tenancy' || matrix.package == 'asas-audit') && 'postgresql+psycopg2://asas_rls:asas_rls@localhost:5432/asas_rls_test' || 'postgresql+psycopg2://asas:asas@localhost:5432/asas_test') || '' }}
           # An unreachable emulator normally skips the azure leg (local dev
           # convenience); in CI that skip must be a failure, or the only
           # behavioural coverage this backend has can vanish silently.
           ASAS_REQUIRE_AZURE: ${{ matrix.package == 'asas-storage' && '1' || '' }}
+          # Same rule for tenant isolation: locally a bypassing role is a
+          # deliberate convenience and the isolation tests skip. In CI that skip
+          # would mean the only coverage the boundary has had silently stopped
+          # running, so on the postgres leg it is a failure instead.
+          ASAS_REQUIRE_RLS: ${{ (matrix.package == 'asas-tenancy' || matrix.package == 'asas-audit') && matrix.engine == 'postgres' && '1' || '' }}
         run: pytest -q
 
   # asas-cli owns no schema and touches no database — it generates text files

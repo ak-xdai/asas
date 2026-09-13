@@ -22,37 +22,28 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.engine import Engine
 
-VERSION_TABLE = "alembic_version_asas_workflow"
+VERSION_TABLE = "alembic_version_asas_audit"
 _BASELINE = "0001"
-_SENTINEL_TABLE = "process_definition"
+_SENTINEL_TABLE = "audit_event"
 # Columns the baseline creates on the sentinel. Baselines are frozen, so this
 # set is a constant; see _assert_adoptable.
 # Every table the baseline revision creates. Genuine adoption means the host's
 # own history created all of them; a subset is a partial schema, not an adopt.
 _BASELINE_TABLES = frozenset({
-    "info_request",
-    "node_assignee",
-    "node_decision",
-    "node_execution",
-    "process_binding",
-    "process_definition",
-    "process_instance",
-    "process_node",
-    "process_transition",
+    "audit_event",
 })
 _SENTINEL_COLUMNS = frozenset({
     "id",
     "org_id",
-    "key",
-    "version",
-    "name",
-    "entity_type",
-    "purpose",
-    "status",
-    "data_fields",
-    "spec_hash",
-    "created_at",
-    "published_at",
+    "seq",
+    "actor",
+    "action",
+    "resource_type",
+    "resource_id",
+    "payload",
+    "occurred_at",
+    "hash_prev",
+    "hash_current",
 })
 
 
@@ -95,9 +86,9 @@ def _assert_adoptable(inspector) -> None:
     absent = sorted(t for t in _BASELINE_TABLES if not inspector.has_table(t))
     if absent:
         raise RuntimeError(
-            f"asas-workflow cannot adopt the existing {_SENTINEL_TABLE!r} table: the "
+            f"asas-audit cannot adopt the existing {_SENTINEL_TABLE!r} table: the "
             f"baseline's other tables are missing {absent}. This database holds a "
-            f"partial asas-workflow schema; stamping it would record the baseline as "
+            f"partial asas-audit schema; stamping it would record the baseline as "
             f"applied and never create them. Restore or drop the partial schema "
             f"and retry."
         )
@@ -114,7 +105,7 @@ def _assert_adoptable(inspector) -> None:
         # baseline would replay the chain over it and fail, and the remedy is
         # never to rename or drop a table that holds real data.
         raise RuntimeError(
-            f"asas-workflow found its own post-rename {_SENTINEL_TABLE!r} schema but no "
+            f"asas-audit found its own post-rename {_SENTINEL_TABLE!r} schema but no "
             f"{VERSION_TABLE!r} table. Restore the version table, or stamp the "
             f"chain at its true revision, and do NOT rename or drop the table: "
             f"it holds real data."
@@ -130,7 +121,7 @@ def _assert_adoptable(inspector) -> None:
         # slip the checks around this one, and stamping would replay the chain
         # and crash raw on the pair that already moved, far from the cause.
         raise RuntimeError(
-            f"asas-workflow cannot adopt the existing {_SENTINEL_TABLE!r} table: its columns are "
+            f"asas-audit cannot adopt the existing {_SENTINEL_TABLE!r} table: its columns are "
             f"PARTIALLY renamed ({sorted(renamed)} moved, "
             f"{sorted(set(_RENAMED_PAIRS) - set(renamed))} did not). Finish or revert "
             f"the half-applied rename (restore from backup, or apply the missing "
@@ -142,9 +133,9 @@ def _assert_adoptable(inspector) -> None:
     )
     if missing:
         raise RuntimeError(
-            f"asas-workflow cannot adopt the existing {_SENTINEL_TABLE!r} table: it is "
+            f"asas-audit cannot adopt the existing {_SENTINEL_TABLE!r} table: it is "
             f"missing the baseline columns {missing}. This database already "
-            f"contains an unrelated table named {_SENTINEL_TABLE!r}, so asas-workflow "
+            f"contains an unrelated table named {_SENTINEL_TABLE!r}, so asas-audit "
             f"cannot use that name. Rename the existing table and retry."
         )
 

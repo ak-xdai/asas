@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asas-tenancy"
+version = "0.1.0"
+description = "Asas tenancy module: the request-scoped tenant context, the Postgres RLS session GUC, migration helpers that protect a tenant-scoped table in one line, and a conformance kit that fails when the isolation is not actually enforced."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+]
+dependencies = [
+    "sqlalchemy>=2.0",
+]
+
+[project.optional-dependencies]
+# Alembic is needed only by the migration helpers, which run inside a host's
+# own chain. A host with no migrations at all never imports them.
+migrations = [
+    "alembic>=1.13",
+]
+dev = [
+    "pytest>=8",
+    "alembic>=1.13",
+    "psycopg2-binary>=2.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/asas_tenancy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

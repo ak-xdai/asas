@@ -38,6 +38,23 @@ class BootSnippet:
 
 
 SNIPPETS: dict[str, BootSnippet] = {
+    "tenancy": BootSnippet(
+        imports=("import asas_tenancy",),
+        setup=(
+            "# RLS is enabled per table inside each package's migration;",
+            "# bind the tenant per request/job with asas_tenancy.set_tenant_guc(conn, org_id)",
+            "# or wrap background engines with asas_tenancy.tenant_engine(dsn, org_id).",
+        ),
+    ),
+    "audit": BootSnippet(
+        imports=("import asas_audit",),
+        setup=(
+            "app.include_router(asas_audit.build_router(get_session, tenant=current_tenant))",
+            "# record inside the business transaction:",
+            "# asas_audit.append(session, org_id=..., actor=..., action=..., resource_type=..., resource_id=...)",
+        ),
+        boot=("asas_audit.migrate(engine)",),
+    ),
     "lookups": BootSnippet(
         imports=("import asas_lookups",),
         setup=(
