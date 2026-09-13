@@ -16,7 +16,7 @@ EXPECTED_KEYS = {
     "tenancy",
     "audit",
     "llm",
-}}
+}
 
 
 def test_all_packages_registered():
