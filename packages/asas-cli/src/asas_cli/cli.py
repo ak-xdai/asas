@@ -114,7 +114,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("--dir", default=None, help="parent directory to create the project in (default: cwd)")
     p_new.set_defaults(func=_cmd_new)
 
+    p_out = sub.add_parser(
+        "outdated",
+        help="compare this project's Asas pins against the latest releases",
+    )
+    p_out.add_argument("--path", default="pyproject.toml",
+                       help="path to the project's pyproject.toml")
+    p_out.add_argument("--ci", action="store_true",
+                       help="exit 1 when a pin is minor-behind (breaking changes "
+                            "waiting), 2 when an advisory affects a pinned version")
+    p_out.set_defaults(func=_cmd_outdated)
+
+    p_rel = sub.add_parser(
+        "release",
+        help="cut and push this package's release tag from the repo checkout "
+             "(maintainers; verifies pyproject/__version__/CHANGELOG agree)",
+    )
+    p_rel.add_argument("package", help="short key or dist name")
+    p_rel.add_argument("--no-push", action="store_true",
+                       help="create the tag locally without pushing")
+    p_rel.set_defaults(func=_cmd_release)
+
     return parser
+
+
+def _cmd_outdated(args) -> int:
+    from pathlib import Path
+
+    from .updates import outdated
+
+    return outdated(Path(args.path), ci=args.ci)
+
+
+def _cmd_release(args) -> int:
+    from .release import release
+
+    release(args.package, push=not args.no_push)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

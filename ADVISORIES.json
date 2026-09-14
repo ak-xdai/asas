@@ -1,0 +1,4 @@
+{
+  "_doc": "Security/critical advisories for Asas packages. One entry per issue: {package, fixed_in, note}. A consumer pinned BELOW fixed_in fails `asas outdated --ci` hard (exit 2) — this is the one case where refreshing a pin is mandatory rather than tiered. Publishing an advisory is an ordinary reviewed commit to this file on main.",
+  "advisories": []
+}

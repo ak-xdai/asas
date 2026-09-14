@@ -2,12 +2,15 @@
 
 The developer on-ramp to the Asas package collection. Not a runtime framework —
 it never wraps or wires anything at import time in a consuming project. Two
-one-shot code generators:
+one-shot code generators, plus the two ends of the release discipline
+([`RELEASING.md`](../../RELEASING.md)):
 
 ```bash
 asas add lookups                          # pin one package into an existing project
 asas new myservice --with lookups,access  # scaffold a new project wired for a set
 asas list                                 # see every known package + its variant
+asas outdated --ci                        # is this project's pinning safe? (consumers)
+asas release validation                   # tag the version on main (maintainers)
 ```
 
 ## Installing
@@ -19,7 +22,7 @@ repo README's "Consuming" section) — its own tag, `asas-cli/vX.Y.Z`, or
 globally with `pipx`:
 
 ```bash
-pipx install "asas-cli @ git+https://github.com/wlootah-a11y/asas.git@asas-cli/v0.1.0#subdirectory=packages/asas-cli"
+pipx install "asas-cli @ git+https://github.com/wlootah-a11y/asas.git@asas-cli/v0.1.1#subdirectory=packages/asas-cli"
 ```
 
 ### Right now — trying it locally, before it's published
@@ -99,6 +102,34 @@ comments naming the exact function to call — never a fabricated call.
 ```bash
 asas new myservice --with lookups,ratelimit,access
 cd myservice && pip install -e '.[dev]' && uvicorn main:app --reload
+```
+
+## `asas outdated`
+
+Reads `pyproject.toml` (`--path` to point elsewhere), compares every Asas pin
+with that package's newest tag, and checks `ADVISORIES.json` on `main`. Each
+pin is reported as `ok`, `patch` (fixes waiting, no action required) or `MINOR`
+(breaking changes waiting), with an `ADVISORY:` note when a published advisory
+covers the pinned version.
+
+```bash
+asas outdated --ci   # exit 0 = fine, 1 = a minor behind, 2 = advisory: refresh now
+```
+
+Without `--ci` a minor-behind pin is only reported, but an advisory still exits
+`2`. An unreachable advisory list warns and never fails the run on its own. The
+tiers and what each one obliges are in `RELEASING.md`, section 2.
+
+## `asas release <package>`
+
+Run from a checkout of `main` after the version bump has merged. Checks that
+`pyproject.toml`, `__version__`, and the newest `CHANGELOG.md` heading agree,
+refuses a tag that already exists locally or on `origin`, then creates and
+pushes the annotated tag `asas-<pkg>/vX.Y.Z`. `--no-push` creates it locally
+only.
+
+```bash
+asas release validation
 ```
 
 ## Where this fits

@@ -130,6 +130,15 @@ Pin a package tag via a git install (no package index):
 asas-lookups @ git+https://github.com/wlootah-a11y/asas.git@asas-lookups/v0.13.2#subdirectory=packages/asas-lookups
 ```
 
+A pin is frozen: updates reach your application only when you bump it, and
+what you owe is tiered (see `RELEASING.md`, "The consumer contract") — patch
+releases never require action, minor releases are deliberate upgrades, and
+advisories are the one mandatory refresh. Make the check part of your CI:
+
+```
+asas outdated --ci   # 0 = fine, 1 = breaking changes waiting, 2 = advisory: refresh now
+```
+
 ## Developing
 
 Each package is standalone: `cd packages/<name>`, `pip install -e '.[dev]'`,

@@ -18,6 +18,19 @@ permissions:
   contents: read
 
 jobs:
+  release-discipline:
+    # A PR that changes a package's shipped code (src/**, pyproject.toml)
+    # must bump that package's version: merged-to-main always equals
+    # release-ready, and `asas release <pkg>` cuts the tag (RELEASING.md,
+    # "Enforcement"). Tests/README/CHANGELOG-only edits are exempt.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python scripts/check_version_bumps.py origin/${{ github.base_ref }}
+
   repo:
     name: repo-wide invariants
     runs-on: ubuntu-latest

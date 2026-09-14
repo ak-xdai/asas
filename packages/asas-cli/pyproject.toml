@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asas-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "Developer CLI for Asas: pin a package into an existing project (`asas add`), or scaffold a new FastAPI project pre-wired for a chosen set of packages (`asas new`)."
 readme = "README.md"
 requires-python = ">=3.11"
