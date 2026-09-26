@@ -15,10 +15,11 @@ EXPECTED_KEYS = {
     "mcp",
     "tenancy",
     "audit",
+    "oracle-hcm",
 }
 
 
-def test_all_ten_packages_registered():
+def test_all_packages_registered():
     assert set(PACKAGES) == EXPECTED_KEYS
 
 
