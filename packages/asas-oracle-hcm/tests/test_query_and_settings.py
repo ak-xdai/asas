@@ -22,7 +22,7 @@ def test_literal_strips_single_quotes_because_oracle_has_no_escape():
 
 
 def test_eq_quotes_by_default_and_can_leave_a_numeric_id_bare():
-    assert eq("RequisitionNumber", 100) == "RequisitionNumber='100'"
+    assert eq("PersonNumber", 100) == "PersonNumber='100'"
     assert eq("PersonId", "300000008607150", quote=False) == "PersonId=300000008607150"
 
 
