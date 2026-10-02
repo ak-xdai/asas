@@ -3,9 +3,9 @@
 A deployment that reaches Fusion through an API gateway registers each
 operation on its own (registered, tested and activated one by one), so "the
 gateway works" is one fact per operation. This walks a MANIFEST of probes in
-order, with the host's own settings, so what it checks is what the host would
-send: the base URL, the gateway key header, and Basic auth only when a username
-is set.
+order, with the host's own client, so what it checks is what the host would
+send: the base URL, the credentials (Basic, a gateway key, an OAuth token) and
+any extra headers.
 
 It never prints a body. The HTTP status, the gateway's or Fusion's error text
 trimmed to one line, a row count and the time taken: enough to tell a missing
@@ -47,10 +47,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from .attachments import enclosure_key
 from .client import OracleFusionClient
+from .errors import OracleAuthError, OracleUpstreamError
 from .lookups import NAME_LOOKUPS
 from .settings import OracleSettings
 
@@ -147,20 +146,26 @@ def _one_line(value: str, limit: int = 160) -> str:
 async def _get(
     client: OracleFusionClient, path: str, params: Mapping[str, Any], *, binary: bool
 ) -> tuple[CheckResult, Any]:
-    http = client._http()
-    headers = client._headers()
     query = dict(params)
+    headers: dict[str, str] = {}
     if binary:
         headers["Accept"] = "*/*"
     else:
         query.setdefault("onlyData", "true")
     started = time.perf_counter()
     try:
-        response = await http.get(
-            client._url(path), params=query, headers=headers, auth=client._settings.basic_auth
+        # guard=False: a check must reach the upstream even with a breaker open,
+        # and it still feeds the client's statistics and hook.
+        response = await client.request(
+            "GET", path, params=query, headers=headers, raise_for_status=False, guard=False
         )
-    except httpx.HTTPError as exc:
-        return CheckResult(path, "unreachable", _one_line(f"{type(exc).__name__}: {exc}")), None
+    except OracleAuthError as exc:
+        # The credential itself could not be had (a token endpoint refused):
+        # nothing reached the operation, and the fix is the configuration.
+        return CheckResult(path, "auth failed", _one_line(str(exc))), None
+    except OracleUpstreamError as exc:
+        cause = exc.__cause__ or exc
+        return CheckResult(path, "unreachable", _one_line(f"{type(cause).__name__}: {cause}")), None
     ms = int((time.perf_counter() - started) * 1000)
     if response.status_code >= 400:
         return CheckResult(path, str(response.status_code), _one_line(response.text), ms), None
@@ -241,11 +246,9 @@ async def check(
 
 
 def render(settings: OracleSettings, results: list[CheckResult]) -> str:
-    key = "set" if settings.gateway_api_key else "not set"
-    basic = "sent" if settings.basic_auth else "not sent"
     lines = [
         f"base URL : {settings.base_url or '(empty)'}",
-        f"API key  : {settings.gateway_api_key_header} ({key}); Basic auth {basic}",
+        f"auth     : {settings.describe_auth()}",
     ]
     width = max((len(r.operation) for r in results), default=10)
     for r in results:

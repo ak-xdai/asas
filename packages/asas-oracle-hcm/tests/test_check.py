@@ -60,7 +60,7 @@ def test_a_missing_value_skips_and_a_refusal_is_one_line(client, oracle):
     assert results[1].status == "skipped"
     assert results[2].status == "500" and "\n" not in results[2].detail and "Transport" in results[2].detail
     text = render(OracleSettings(base_url=BASE, username="u", password="p"), results)
-    assert "Basic auth sent" in text and "1 of 2 calls answered 2xx" in text
+    assert "auth     : Basic" in text and "1 of 2 calls answered 2xx" in text
 
 
 def test_a_manifest_loads_from_json_and_refuses_unknown_fields(tmp_path):

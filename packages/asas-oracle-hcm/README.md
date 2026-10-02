@@ -7,6 +7,13 @@ that integrates Fusion rediscovers the same things (there is no working OR,
 several ids in one query return 500, test pods scrub every work email, a
 duplicate key comes back as a 400 with prose); they are solved here.
 
+**Two layers, one package.** The FUSION core works on any Fusion REST API
+(HCM, ERP, SCM alike): settings and credentials, the client and its breakers,
+the query grammar, paging limits, attachments and the gateway check. The HCM
+layer adds what HCM integrations share: the reference-data lookups (grades,
+departments, workers, positions and the rest) and the cache default that keeps
+them. An ERP integration uses the core and ignores the rest.
+
 **It is domain-agnostic.** It knows Fusion (the query grammar, the media
 types, the paging limits, attachments, and the HCM reference data every product
 resolves ids against: grades, departments, business units, organizations, jobs,
@@ -51,33 +58,42 @@ await client.aclose()        # or: async with oracle.OracleFusionClient(...) as 
 
 ## Settings
 
-`OracleSettings(base_url, username, password, timeout_seconds=30,
-gateway_api_key="", gateway_api_key_header="x-api-key", max_connections=20,
-connect_retries=2)`. It validates at construction, so a half-wired host fails
-at boot.
+`OracleSettings(base_url, ...)` validates at construction, so a half-wired host
+fails at boot. An **empty `base_url` is allowed** and means "Oracle is off in
+this deployment": `client.configured` is `False` and the first call raises
+`OracleNotConfiguredError`, so a host can boot without an instance.
 
-An **empty `base_url` is allowed** and means "Oracle is off in this
-deployment": `client.configured` is `False` and the first call raises
-`OracleNotConfiguredError`, so a host can boot, and a status page can answer,
-without an instance.
+**Credentials, three shapes that combine** (`settings.auth()` builds them;
+`settings.describe_auth()` names them without their values):
 
-`gateway_api_key` is for a deployment that reaches Fusion through an API
-gateway: every request also carries the key in `gateway_api_key_header`, and an
-unset key sends no header. **Basic auth travels only when a username is set**:
-direct to Fusion the service account is required, but a gateway that
-authenticates to the integration layer itself (an OAuth client behind it, as
-with AD Connect in front of Oracle Integration Cloud) takes the key ALONE, and
-an empty pair must send no `Authorization: Basic Og==`. So a `base_url` needs a
-username and password, a gateway key, or both.
+| Settings | Sends | For |
+| --- | --- | --- |
+| `username`, `password` | `Authorization: Basic ...` | Fusion directly, with an integration user |
+| `gateway_api_key`, `gateway_api_key_header` | one header, e.g. `x-api-key` | an API gateway; alone when the gateway authenticates onward itself |
+| `oauth_token_url`, `oauth_client_id`, `oauth_client_secret`, `oauth_scope` | `Authorization: Bearer <token>` | Oracle Integration Cloud directly, or a gateway that wants a token |
 
-`max_connections` bounds the pool the client owns (the TLS handshake to a
-gateway is the dear part, so connections stay warm) and `connect_retries`
-retries a connection that could not be opened, which sent nothing and so is
-safe even for a POST. Neither applies to an `httpx.AsyncClient` you pass in.
+A `base_url` needs at least one. A gateway key combines with either of the
+others; Basic and OAuth are refused together, because both own the
+`Authorization` header. The OAuth token is fetched on first use, shared by
+concurrent requests, reused until a minute before it expires, and renewed
+after a 401, when the refused request is sent once more (it was refused before
+anything ran, so that is safe even for a POST). Anything else (a managed
+identity, a token the host already caches) is a credential of your own,
+passed as `OracleFusionClient(settings, auth=...)`: `BearerToken(callable)`,
+or any object with the two methods of the `Auth` protocol.
+
+`extra_headers={...}` ride on every request: `REST-Framework-Version`, which
+changes how Fusion shapes some answers, or a header your gateway asks for.
+
+`max_connections` (20) bounds the pool the client owns, kept warm because the
+TLS handshake to a gateway is the dear part, and `connect_retries` (2) retries
+a connection that could not be opened, which sent nothing and so is safe even
+for a POST. Neither applies to an `httpx.AsyncClient` you pass in.
 
 `OracleSettings.from_env(prefix="ORACLE_HCM_")` reads `BASE_URL`, `USERNAME`,
-`PASSWORD` and the optional `TIMEOUT_SECONDS`, `GATEWAY_API_KEY`,
-`GATEWAY_API_KEY_HEADER`, `MAX_CONNECTIONS`, `CONNECT_RETRIES`.
+`PASSWORD`, `GATEWAY_API_KEY`, `GATEWAY_API_KEY_HEADER`, `OAUTH_TOKEN_URL`,
+`OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_SCOPE`, `TIMEOUT_SECONDS`,
+`MAX_CONNECTIONS` and `CONNECT_RETRIES`.
 
 ## The client
 
@@ -110,21 +126,31 @@ A host that needs a private CA, a proxy or a shared pool passes its own
 
 ## Upstream health
 
-Every request goes through a **circuit breaker**, `Breaker(failures=5,
-cooldown_seconds=30)`, passed to the client as `breaker=`. After `failures`
-consecutive faults (a transport error, a 5xx or a 429; any other 4xx is an
-answer, not a fault) READS raise `OracleUnavailableError` at once, before any
-request, instead of each waiting out the timeout against a gateway that is down.
-When the cooldown ends ONE probe goes out: success closes the breaker, a fault
-opens it again. **Writes are counted but never refused**, because the caller's
-outbox owns their retry and cadence. `Breaker(failures=0)` turns it off. It is
-per client, so per process: the process that cannot reach the gateway is the
-one that stops asking.
+**Circuit breakers, one per resource and one for the host**, configured by
+`BreakerPolicy(failures=5, cooldown_seconds=30)` passed as `breaker=`. After
+`failures` consecutive outages on a resource, READS of it raise
+`OracleUnavailableError` at once (with `retry_after_seconds`) instead of each
+waiting out the timeout; when the cooldown ends ONE probe goes out, and
+success closes the breaker while a fault opens it again. **Writes are counted
+but never refused**, because the caller's outbox owns their retry.
+`BreakerPolicy(failures=0)` turns them off.
 
-`client.health.snapshot()` is a JSON-ready view for a status page: the breaker
-state, consecutive faults, reads refused, and per method and resource the
-calls, faults, average and worst latency.
+**What counts as an outage** (`is_outage`) is narrow on purpose: no response
+at all, 502, 503, 504 or 429. A 500 is an ANSWER: it is what a gateway returns
+for an operation registered wrong and what Fusion returns for a query it
+cannot run, so counting it would let one broken endpoint switch every read
+off. 401/403 are `OracleAuthError`, a configuration fault, never an outage.
+Per resource for the same reason (`/positions` failing does not stop
+`/grades`), while a connection failure also counts against the HOST breaker,
+since when the host is down every resource is.
 
+`client.health.snapshot()` is a JSON-ready view for a status page: the overall
+state, every breaker that is not plainly closed, reads refused, and per method
+and resource the calls, faults, average and worst latency.
+
+`on_request=` is called once per request with a `RequestEvent(method,
+resource, path, status, elapsed_ms, fault, refused)`, for your own metrics or
+tracing (OpenTelemetry, Prometheus); an exception in it is logged and ignored.
 `count_calls()` counts the Oracle requests made inside a block, which is how a
 host notices a request path that has started reaching Oracle (cache hits are
 not calls):
@@ -134,6 +160,11 @@ with oracle.count_calls() as counted:
     response = await call_next(request)
 log.info("request", path=request.url.path, oracle_calls=counted.calls)
 ```
+
+`client.request(method, path, params=, json_body=, headers=,
+raise_for_status=True, guard=None)` is the one building block every verb uses,
+public for what they do not cover; `raise_for_status=False` returns a 4xx/5xx
+response instead of raising, and `guard=False` sends even with a breaker open.
 
 ## Checking a gateway registration
 
@@ -169,7 +200,7 @@ manifest for an Oracle Recruiting integration (18 reads, 2 writes listed).
 
 ```
 ORACLE_HCM_BASE_URL=https://gateway.example/OIC/1.0 ORACLE_HCM_GATEWAY_API_KEY=... \
-  ORACLE_HCM_GATEWAY_API_KEY_HEADER=x-CentraSite-APIKey asas-oracle-check --manifest probes.json
+  ORACLE_HCM_GATEWAY_API_KEY_HEADER=X-Gateway-Key asas-oracle-check --manifest probes.json
 ```
 
 ## The query language
@@ -180,9 +211,14 @@ What a real pod does with `q`, and the helpers that keep you off the traps:
 - **There is no working OR.** `OR`, `IN (...)` and a comma list all silently
   match nothing. A facet takes one value; several ids mean several requests.
 - `like(field, term)` is `field LIKE '%term%'`, case-insensitive on `Title`.
-- **Values are single-quoted with no escape form**, so `literal()` strips
-  quotes. `eq(field, value)` quotes; `eq(..., quote=False)` leaves a bare
-  numeric id, the form the id lookups use.
+- **Values are single-quoted with no escape form.** A quote would end the
+  literal and a `;` would start another clause, so either changes what the
+  query MEANS (an input that reads more than it should). `eq`, `like` and
+  `literal` raise `OracleQueryError` for both, before anything is sent, and a
+  field name must be an attribute name. `strip_quotes=True` is the explicit
+  opt-in for free text, accepting that `O'Brien` is searched as `OBrien`.
+- `eq(field, value)` quotes; `eq(..., quote=False)` leaves a bare value, which
+  must then be a plain id token (`300000008607150`).
 - **Equality is case-sensitive.**
 
 Row readers: `text` (null reads as ""), `flag` (JSON booleans and "Y"/"N"
@@ -192,7 +228,10 @@ bare list on some resources and as `{"items": [...]}` on others.
 ## Lookups
 
 `OracleLookups(client, concurrency=12, name_ttl_seconds=21600,
-people_ttl_seconds=3600, store=None)`. Hold one per process.
+people_ttl_seconds=3600, store=None, kinds=None)`. Hold one per process.
+`kinds` adds your own id kinds to the eight built in, as `{kind: (resource, id
+field, name field)}`, for example `{"location": ("/locations", "LocationId",
+"LocationName")}`; `lookups.kinds` lists them all.
 
 - `names(kind, ids)` for `grade`, `department`, `business_unit`,
   `organization`, `job`, `position`, `job_family`, `person`
@@ -297,11 +336,14 @@ Fusion's own limits, on any resource; both return raw rows.
 ```
 OracleError
 ├── OracleConfigError          the host wired it wrong (raised at construction)
+├── OracleQueryError           a value the q grammar cannot carry (also a ValueError)
 ├── OracleNotConfiguredError   no base URL: Oracle is off here
-└── OracleUpstreamError        refused, unreachable, or not JSON (.status, .method, .path, .is_transient)
+└── OracleUpstreamError        refused, unreachable, or not JSON (.status, .method, .path,
+    │                          .is_transient, .retry_after_seconds on a 429/503)
     ├── OracleNotFoundError        404: a real answer about a real record
+    ├── OracleAuthError            401/403, or no token could be had: configuration, never transient
     ├── OracleAlreadyExistsError   a create refused because a caller-minted key is taken
-    └── OracleUnavailableError     the breaker is open: refused at once (.retry_after_seconds)
+    └── OracleUnavailableError     a breaker is open: refused at once (.retry_after_seconds)
 ```
 
 Oracle's response body is never put on an exception (it carries tenant detail

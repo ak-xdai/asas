@@ -128,8 +128,8 @@ def test_worker_department_reads_the_primary_assignment_by_work_email(lookups, o
             {"DepartmentId": "11", "DepartmentName": "Old", "PrimaryFlag": False},
             {"DepartmentId": "22", "DepartmentName": " Digital Office ", "PrimaryFlag": True},
         )
-    ]} if rec.params["q"] == "WorkEmail='jane@dge.gov.ae'" else {"items": []}))
-    found = run(lookups.worker_department("jane@dge.gov.ae"))
+    ]} if rec.params["q"] == "WorkEmail='jane@example.gov'" else {"items": []}))
+    found = run(lookups.worker_department("jane@example.gov"))
     assert found == WorkerDepartment("300000001", "22", "Digital Office")
     assert oracle.calls[0].params["expand"] == "assignments"
 
@@ -137,14 +137,14 @@ def test_worker_department_reads_the_primary_assignment_by_work_email(lookups, o
 def test_worker_lookup_falls_back_to_username_lowercased(lookups, oracle):
     oracle.route("/publicWorkers", lambda rec: httpx.Response(200, json={"items": [
         _assignment_worker({"DepartmentId": "22", "DepartmentName": "D"})
-    ]} if rec.params["q"] == "Username='jane@dge.gov.ae'" else {"items": []}))
-    found = run(lookups.worker_department("Jane@DGE.gov.ae"))
+    ]} if rec.params["q"] == "Username='jane@example.gov'" else {"items": []}))
+    found = run(lookups.worker_department("Jane@Example.gov"))
     assert found is not None and found.department_id == "22"
     assert [c.params["q"] for c in oracle.calls] == [
-        "WorkEmail='Jane@DGE.gov.ae'",
-        "WorkEmail='jane@dge.gov.ae'",
-        "Username='Jane@DGE.gov.ae'",
-        "Username='jane@dge.gov.ae'",
+        "WorkEmail='Jane@Example.gov'",
+        "WorkEmail='jane@example.gov'",
+        "Username='Jane@Example.gov'",
+        "Username='jane@example.gov'",
     ]
 
 
@@ -176,12 +176,12 @@ def test_departments_in_set_pages_in_id_order_and_filters_active(lookups, oracle
         return httpx.Response(200, json={"items": rows, "hasMore": offset == 0})
 
     oracle.route("/departments", pages)
-    found = run(lookups.departments_in_set("AD_DGE"))
+    found = run(lookups.departments_in_set("CORP_SET"))
     assert len(found) == 201 and found[-1] == ("900", "Last")
     first = oracle.calls[0].params
-    assert first["q"] == "SetCode='AD_DGE';ActiveStatus='A'"
+    assert first["q"] == "SetCode='CORP_SET';ActiveStatus='A'"
     assert first["orderBy"] == "OrganizationId:asc"
     oracle.calls.clear()
-    run(lookups.departments_in_set("AD_DGE", active_only=False))
-    assert oracle.calls[0].params["q"] == "SetCode='AD_DGE'"
+    run(lookups.departments_in_set("CORP_SET", active_only=False))
+    assert oracle.calls[0].params["q"] == "SetCode='CORP_SET'"
     assert run(lookups.departments_in_set("  ")) == []

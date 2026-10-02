@@ -18,6 +18,15 @@ class OracleConfigError(OracleError):
     """The host wired the settings wrong (raised at construction)."""
 
 
+class OracleQueryError(OracleError, ValueError):
+    """A value cannot be written into Oracle's ``q`` grammar safely.
+
+    The grammar has no escape form: a single quote ends the literal and a
+    ``;`` starts another clause, so a value holding either would change what
+    the query means (an input that reads more rows than the caller asked for).
+    Raised BEFORE any request, so nothing is sent."""
+
+
 class OracleNotConfiguredError(OracleError):
     """No base URL, so the integration is off for this deployment.
 
@@ -39,16 +48,33 @@ class OracleUpstreamError(OracleError):
         status: int | None = None,
         method: str = "",
         path: str = "",
+        retry_after_seconds: int | None = None,
     ) -> None:
         super().__init__(message)
         self.status = status
         self.method = method
         self.path = path
+        #: What the upstream asked a caller to wait (``Retry-After`` on a 429 or
+        #: a 503), or ``None`` when it said nothing.
+        self.retry_after_seconds = retry_after_seconds
 
     @property
     def is_transient(self) -> bool:
         """Worth retrying later: no answer at all, a throttle, or a 5xx."""
         return self.status is None or self.status == 429 or self.status >= 500
+
+
+class OracleAuthError(OracleUpstreamError):
+    """Oracle or the gateway refused the credentials (401) or the permission
+    (403), or a token could not be obtained.
+
+    Its own class because it is a CONFIGURATION fault, not an outage: retrying
+    will not fix it, it never trips the circuit breaker, and it says to look at
+    the key, the account or the role rather than at the network."""
+
+    @property
+    def is_transient(self) -> bool:
+        return False
 
 
 class OracleNotFoundError(OracleUpstreamError):
@@ -75,5 +101,6 @@ class OracleUnavailableError(OracleUpstreamError):
     the breaker will let one probe through. Transient by definition."""
 
     def __init__(self, message: str, *, retry_after_seconds: int, method: str = "", path: str = "") -> None:
-        super().__init__(message, status=None, method=method, path=path)
-        self.retry_after_seconds = retry_after_seconds
+        super().__init__(
+            message, status=None, method=method, path=path, retry_after_seconds=retry_after_seconds
+        )

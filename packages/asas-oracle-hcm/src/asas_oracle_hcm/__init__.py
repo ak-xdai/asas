@@ -22,10 +22,18 @@ four host-contract slots. Everything is an object the host constructs:
   :class:`LookupStore` shared across processes (stale answers served and
   refreshed behind the caller, negative answers kept);
   :class:`MemoryLookupStore` is the in-process one.
-- Upstream health: a :class:`Breaker` that makes reads fail fast with
-  :class:`OracleUnavailableError` during an outage, per-resource call
-  statistics (``client.health.snapshot()``), and :func:`count_calls` to count
-  the Oracle requests one host request made.
+- Credentials as a seam (:class:`Auth`): :class:`BasicAuth`,
+  :class:`ApiKeyAuth`, :class:`BearerToken`, :class:`OAuthClientCredentials`
+  (a cached, refreshed client-credentials token) and :class:`CompositeAuth`;
+  :meth:`OracleSettings.auth` builds the right one from the settings.
+- Upstream health: circuit breakers per resource plus one for the host
+  (:class:`BreakerPolicy`, counting only real outages, :func:`is_outage`)
+  that make reads fail fast with :class:`OracleUnavailableError`,
+  per-resource statistics (``client.health.snapshot()``), an ``on_request``
+  hook (:class:`RequestEvent`) for a host's own metrics, and
+  :func:`count_calls` for the Oracle requests one host request made.
+- ``client.request(...)``: the one public building block every verb uses, for
+  what the verbs do not cover.
 - :mod:`asas_oracle_hcm.check` (``asas-oracle-check``): each read a deployment
   depends on called once, from a manifest of :class:`Probe` s, for verifying a
   gateway registration (the HCM reference reads by default).
@@ -38,12 +46,22 @@ four host-contract slots. Everything is an object the host constructs:
 - Errors: :class:`OracleError` > :class:`OracleConfigError`,
   :class:`OracleNotConfiguredError`, :class:`OracleUpstreamError` >
   :class:`OracleNotFoundError`, :class:`OracleAlreadyExistsError`,
-  :class:`OracleUnavailableError`.
+  :class:`OracleAuthError`, :class:`OracleUnavailableError`, and
+  :class:`OracleQueryError` for a value the ``q`` grammar cannot carry.
 """
 
 from __future__ import annotations
 
 from .attachments import attachments, download_enclosure, enclosure_key
+from .auth import (
+    ApiKeyAuth,
+    Auth,
+    BasicAuth,
+    BearerToken,
+    CompositeAuth,
+    NoAuth,
+    OAuthClientCredentials,
+)
 from .cache import (
     LOOKUP_TTL_SECONDS,
     REFERENCE_RESOURCES,
@@ -57,10 +75,12 @@ from .check import REFERENCE_PROBES, CheckResult, Probe, check, load_manifest
 from .client import MAX_PAGE_SIZE, CollectionPage, OracleFusionClient
 from .errors import (
     OracleAlreadyExistsError,
+    OracleAuthError,
     OracleConfigError,
     OracleError,
     OracleNotConfiguredError,
     OracleNotFoundError,
+    OracleQueryError,
     OracleUnavailableError,
     OracleUpstreamError,
 )
@@ -80,18 +100,33 @@ from .query import and_, child_items, eq, flag, integer, like, literal, text
 from .paging import DEFAULT_OFFSET_CEILING, CappedPage, capped_page
 from .settings import OracleSettings
 from .store import LookupStore, MemoryLookupStore, StoredAnswer
-from .upstream import Breaker, CallCount, UpstreamHealth, count_calls
+from .upstream import (
+    OUTAGE_STATUSES,
+    Breaker,
+    BreakerPolicy,
+    CallCount,
+    RequestEvent,
+    UpstreamHealth,
+    count_calls,
+    is_outage,
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "ApiKeyAuth",
+    "Auth",
+    "BasicAuth",
+    "BearerToken",
     "Breaker",
+    "BreakerPolicy",
     "Cache",
     "CachePolicy",
     "CallCount",
     "CappedPage",
     "CheckResult",
     "CollectionPage",
+    "CompositeAuth",
     "DEFAULT_CONCURRENCY",
     "DEFAULT_OFFSET_CEILING",
     "DIRECTORY_KIND",
@@ -101,14 +136,19 @@ __all__ = [
     "MemoryCache",
     "MemoryLookupStore",
     "NAME_LOOKUPS",
+    "NoAuth",
     "NullCache",
+    "OAuthClientCredentials",
+    "OUTAGE_STATUSES",
     "OracleAlreadyExistsError",
+    "OracleAuthError",
     "OracleConfigError",
     "OracleError",
     "OracleFusionClient",
     "OracleLookups",
     "OracleNotConfiguredError",
     "OracleNotFoundError",
+    "OracleQueryError",
     "OracleSettings",
     "OracleUnavailableError",
     "OracleUpstreamError",
@@ -118,6 +158,7 @@ __all__ = [
     "Probe",
     "REFERENCE_PROBES",
     "REFERENCE_RESOURCES",
+    "RequestEvent",
     "SCRUBBED_WORK_EMAIL",
     "StoredAnswer",
     "UpstreamHealth",
@@ -133,6 +174,7 @@ __all__ = [
     "eq",
     "flag",
     "integer",
+    "is_outage",
     "like",
     "literal",
     "load_manifest",

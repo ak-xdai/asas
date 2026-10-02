@@ -4,6 +4,7 @@ import pytest
 
 from asas_oracle_hcm import (
     OracleConfigError,
+    OracleQueryError,
     OracleSettings,
     and_,
     child_items,
@@ -16,9 +17,47 @@ from asas_oracle_hcm import (
 )
 
 
-def test_literal_strips_single_quotes_because_oracle_has_no_escape():
-    assert literal("O'Brien") == "OBrien"
-    assert eq("LastName", "O'Brien") == "LastName='OBrien'"
+def test_a_quote_is_refused_unless_stripping_is_asked_for():
+    """Oracle has no escape form, so a quote is refused rather than silently
+    dropped (which used to search O'Brien as OBrien and match nothing)."""
+    with pytest.raises(OracleQueryError):
+        literal("O'Brien")
+    with pytest.raises(OracleQueryError):
+        eq("LastName", "O'Brien")
+    assert literal("O'Brien", strip_quotes=True) == "OBrien"
+    assert eq("LastName", "O'Brien", strip_quotes=True) == "LastName='OBrien'"
+
+
+@pytest.mark.parametrize("value", ["1;BusinessUnitId=999", "a;b"])
+def test_a_semicolon_cannot_start_another_clause(value):
+    """`;` is Oracle's AND: in a value it would widen the query."""
+    with pytest.raises(OracleQueryError):
+        eq("Name", value)
+    with pytest.raises(OracleQueryError):
+        eq("Name", value, strip_quotes=True)
+    with pytest.raises(OracleQueryError):
+        like("Name", value)
+
+
+@pytest.mark.parametrize("value", ["1;BusinessUnitId=999", "1 OR 1=1", "1'", "", "PersonId>0"])
+def test_an_unquoted_value_must_be_a_plain_id(value):
+    with pytest.raises(OracleQueryError):
+        eq("PersonId", value, quote=False)
+
+
+@pytest.mark.parametrize("field", ["Name;x", "Name='a'", "", "1Name", "Name Name"])
+def test_a_field_name_must_be_an_attribute_name(field):
+    with pytest.raises(OracleQueryError):
+        eq(field, "a")
+
+
+def test_query_errors_are_value_errors_and_oracle_errors():
+    from asas_oracle_hcm import OracleError
+
+    with pytest.raises(ValueError):
+        literal("a;b")
+    with pytest.raises(OracleError):
+        literal("a;b")
 
 
 def test_eq_quotes_by_default_and_can_leave_a_numeric_id_bare():

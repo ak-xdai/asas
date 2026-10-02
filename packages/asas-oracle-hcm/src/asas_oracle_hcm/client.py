@@ -23,9 +23,10 @@ leaves the record where once did) and so is safe for a caller to retry; a
 state TRANSITION endpoint such as ``POST .../action/move`` is not, because a
 repeat advances the record again.
 
-**A circuit breaker guards the reads** (:class:`asas_oracle_hcm.Breaker`): after
-consecutive faults they fail at once with :class:`OracleUnavailableError`
-instead of each waiting out the timeout. Writes are counted, never refused.
+**Circuit breakers guard the reads**, one per resource plus one for the host
+(:class:`asas_oracle_hcm.BreakerPolicy`): after consecutive outages they fail
+at once with :class:`OracleUnavailableError` instead of each waiting out the
+timeout. Writes are counted, never refused.
 :attr:`OracleFusionClient.health` carries the breaker and per-resource call
 statistics for a status page.
 """
@@ -36,20 +37,24 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
+from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator, NamedTuple
 
 import httpx
 
+from .auth import Auth
 from .cache import Cache, CachePolicy, MemoryCache
 from .errors import (
     OracleAlreadyExistsError,
+    OracleAuthError,
     OracleNotConfiguredError,
     OracleNotFoundError,
     OracleUnavailableError,
     OracleUpstreamError,
 )
 from .settings import OracleSettings
-from .upstream import Breaker, UpstreamHealth
+from .upstream import BreakerPolicy, RequestEvent, UpstreamHealth
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,22 @@ def _ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000.0
 
 
+def _retry_after(response: httpx.Response) -> int | None:
+    """``Retry-After`` as seconds (it may be a number or an HTTP date)."""
+    raw = (response.headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    from datetime import datetime, timezone
+
+    return max(0, int((when - datetime.now(timezone.utc)).total_seconds()))
+
+
 def _resource(path: str) -> str:
     return path.strip("/").split("/", 1)[0].split("?", 1)[0]
 
@@ -92,7 +113,7 @@ class CollectionPage(NamedTuple):
 
 
 class OracleFusionClient:
-    """Basic-auth JSON client for one Oracle Fusion instance.
+    """JSON client for one Oracle Fusion instance.
 
     Holds one ``httpx.AsyncClient`` so the TLS handshake is paid once. A host
     that needs a private CA, a proxy or a shared pool passes its own as
@@ -108,9 +129,17 @@ class OracleFusionClient:
         cache: Cache | None = None,
         cache_policy: CachePolicy | None = None,
         cache_namespace: str = "asas:oracle",
-        breaker: Breaker | None = None,
+        breaker: BreakerPolicy | None = None,
+        auth: Auth | None = None,
+        on_request: Callable[[RequestEvent], Any] | None = None,
     ) -> None:
+        """``auth`` replaces the credential the settings describe
+        (:meth:`OracleSettings.auth`); ``on_request`` is called once per
+        request with a :class:`RequestEvent`, for a host's own metrics or
+        tracing (an exception in it is logged and ignored)."""
         self._settings = settings
+        self._auth: Auth = auth if auth is not None else settings.auth()
+        self._on_request = on_request
         self._borrowed = http
         self._owned: httpx.AsyncClient | None = None
         self._cache: Cache = cache if cache is not None else MemoryCache()
@@ -119,7 +148,7 @@ class OracleFusionClient:
         # share one store without sharing answers.
         scope = hashlib.sha1(settings.base_url.encode()).hexdigest()[:10]
         self._ns = f"{cache_namespace}:{scope}"
-        self._health = UpstreamHealth(breaker if breaker is not None else Breaker())
+        self._health = UpstreamHealth(breaker)
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -137,12 +166,13 @@ class OracleFusionClient:
         """Safe to show: credentials travel in the Authorization header."""
         return self._settings.base_url
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
-        s = self._settings
-        if s.gateway_api_key:
-            headers[s.gateway_api_key_header] = s.gateway_api_key
-        return headers
+    def _emit(self, event: RequestEvent) -> None:
+        if self._on_request is None:
+            return
+        try:
+            self._on_request(event)
+        except Exception:  # noqa: BLE001 - a metrics hook must never fail a request
+            logger.warning("oracle on_request hook raised", exc_info=True)
 
     def _http(self) -> httpx.AsyncClient:
         if not self._settings.configured:
@@ -165,7 +195,7 @@ class OracleFusionClient:
     def _url(self, path: str) -> str:
         return f"{self._settings.base_url}/{path.lstrip('/')}"
 
-    async def _send(
+    async def request(
         self,
         method: str,
         path: str,
@@ -173,63 +203,97 @@ class OracleFusionClient:
         params: dict[str, Any] | None = None,
         json_body: Any = None,
         headers: dict[str, str] | None = None,
+        raise_for_status: bool = True,
+        guard: bool | None = None,
     ) -> httpx.Response:
+        """Send one request with the client's credentials, breakers, statistics
+        and hook, and return Fusion's response.
+
+        The building block the verbs below use, public for what they do not
+        cover (a resource with its own media type, a diagnostic). ``path`` is
+        relative to the REST root and ``params`` are sent as given.
+        ``raise_for_status=False`` returns a 4xx/5xx response instead of
+        raising (the body is then the caller's to keep out of logs).
+        ``guard`` decides whether an open breaker refuses the request: by
+        default reads are guarded and writes are not.
+
+        A credential that can be renewed (an OAuth token) is renewed and the
+        request sent ONCE more after a 401: the upstream refused it before
+        doing anything, so even a POST is safe to resend."""
         http = self._http()
         s = self._settings
         health = self._health
-        breaker = health.breaker
-        # Reads are guarded; writes are counted but never refused, because the
-        # caller's outbox owns their retry and cadence.
-        if method == "GET" and not breaker.allow():
-            health.refused += 1
-            raise OracleUnavailableError(
-                "Oracle is unavailable; not asking again until the cooldown ends.",
-                retry_after_seconds=breaker.retry_after_seconds(),
-                method=method,
-                path=path,
-            )
         resource = _resource(path) or "root"
-        started = time.perf_counter()
-        try:
-            response = await http.request(
-                method,
-                self._url(path),
-                params=params,
-                json=json_body,
-                headers={**self._headers(), **(headers or {})},
-                auth=s.basic_auth,
-                timeout=s.timeout_seconds,
-            )
-        except httpx.HTTPError as exc:
-            health.record(method, resource, _ms(started), fault=True)
-            logger.warning("oracle %s %s: transport failure: %s", method, path, exc)
-            raise OracleUpstreamError(
-                "Oracle is unreachable.", method=method, path=path
-            ) from exc
-        except BaseException:
-            # Cancelled mid-call: no verdict, but a probe must not stay claimed.
-            breaker.release_probe()
-            raise
-        code = response.status_code
-        health.record(method, resource, _ms(started), fault=code >= 500 or code == 429)
-        if response.status_code >= 400:
+        guarded = (method == "GET") if guard is None else guard
+        if guarded:
+            refusing = health.allow(resource)
+            if refusing is not None:
+                health.refused += 1
+                self._emit(RequestEvent(method, resource, path, None, 0.0, False, refused=True))
+                raise OracleUnavailableError(
+                    "Oracle is unavailable; not asking again until the cooldown ends.",
+                    retry_after_seconds=refusing.retry_after_seconds(),
+                    method=method,
+                    path=path,
+                )
+        response: httpx.Response | None = None
+        for attempt in (1, 2):
+            started = time.perf_counter()
+            try:
+                sent_headers = {
+                    "Accept": "application/json",
+                    **s.extra_headers,
+                    **await self._auth.headers(http),
+                    **(headers or {}),
+                }
+                response = await http.request(
+                    method,
+                    self._url(path),
+                    params=params,
+                    json=json_body,
+                    headers=sent_headers,
+                    timeout=s.timeout_seconds,
+                )
+            except OracleAuthError:
+                health.release(resource)
+                raise
+            except httpx.HTTPError as exc:
+                elapsed = _ms(started)
+                fault = health.record(method, resource, elapsed, status=None)
+                self._emit(RequestEvent(method, resource, path, None, elapsed, fault))
+                logger.warning("oracle %s %s: transport failure: %s", method, path, exc)
+                raise OracleUpstreamError(
+                    "Oracle is unreachable.", method=method, path=path
+                ) from exc
+            except BaseException:
+                # Cancelled mid-call: no verdict, but a probe must not stay claimed.
+                health.release(resource)
+                raise
+            elapsed = _ms(started)
+            fault = health.record(method, resource, elapsed, status=response.status_code)
+            self._emit(RequestEvent(method, resource, path, response.status_code, elapsed, fault))
+            if response.status_code == 401 and attempt == 1 and self._auth.invalidate():
+                continue
+            break
+        assert response is not None
+        if response.status_code >= 400 and raise_for_status:
+            code = response.status_code
             text = response.text[:500]
-            logger.warning("oracle %s %s answered %s", method, path, response.status_code)
+            logger.warning("oracle %s %s answered %s", method, path, code)
             logger.debug("oracle %s %s body: %s", method, path, text)
             kind: type[OracleUpstreamError] = OracleUpstreamError
-            if response.status_code == 404:
+            if code == 404:
                 kind = OracleNotFoundError
-            elif (
-                method == "POST"
-                and response.status_code in (400, 409)
-                and _reads_as_duplicate(text)
-            ):
+            elif code in (401, 403):
+                kind = OracleAuthError
+            elif method == "POST" and code in (400, 409) and _reads_as_duplicate(text):
                 kind = OracleAlreadyExistsError
             raise kind(
-                f"Oracle answered {response.status_code}.",
-                status=response.status_code,
+                f"Oracle answered {code}.",
+                status=code,
                 method=method,
                 path=path,
+                retry_after_seconds=_retry_after(response) if code in (429, 503) else None,
             )
         return response
 
@@ -303,7 +367,7 @@ class OracleFusionClient:
             cached = await self._cache.get(cache_key)
             if isinstance(cached, dict) and isinstance(cached.get("body"), dict):
                 return cached["body"]
-        response = await self._send("GET", path, params=query)
+        response = await self.request("GET", path, params=query)
         body = self._json(response, "GET", path)
         if cache_key:
             if body.get("items") == []:
@@ -362,7 +426,7 @@ class OracleFusionClient:
         """GET a binary enclosure: ``(content, content_type)``. No ``onlyData``
         and ``Accept: */*``, because an enclosure answers ``406`` to a JSON
         Accept header. Read whole, not streamed."""
-        response = await self._send("GET", path, headers={"Accept": "*/*"})
+        response = await self.request("GET", path, headers={"Accept": "*/*"})
         content_type = response.headers.get("content-type", "application/octet-stream")
         return response.content, content_type.split(";")[0].strip()
 
@@ -370,7 +434,7 @@ class OracleFusionClient:
         """POST (create) and return the record Oracle answers. A refusal that
         names a taken key raises :class:`OracleAlreadyExistsError`."""
         await self._invalidate(path)
-        response = await self._send(
+        response = await self.request(
             "POST", path, json_body=body, headers={"Content-Type": "application/json"}
         )
         answered = self._json(response, "POST", path)
@@ -381,7 +445,7 @@ class OracleFusionClient:
         """PATCH a record by id and return the updated record, so a caller can
         read back what actually landed."""
         await self._invalidate(path)
-        response = await self._send(
+        response = await self.request(
             "PATCH", path, json_body=body, headers={"Content-Type": _ADF_ITEM}
         )
         answered = self._json(response, "PATCH", path)

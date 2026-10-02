@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Mapping, Sequence
 
 from .client import MAX_PAGE_SIZE, OracleFusionClient
+from .errors import OracleQueryError
 from .query import and_, child_items, eq, flag, text
 from .store import LookupStore, StoredAnswer
 
@@ -168,18 +169,32 @@ class OracleLookups:
         name_ttl_seconds: float = 21_600.0,
         people_ttl_seconds: float = 3_600.0,
         store: LookupStore | None = None,
+        kinds: Mapping[str, tuple[str, str, str]] | None = None,
     ) -> None:
+        """``kinds`` adds to (or overrides) :data:`NAME_LOOKUPS`: ``{kind:
+        (resource, id field, name field)}`` for whatever else a product names
+        ids against (``{"location": ("/locations", "LocationId",
+        "LocationName")}``)."""
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
         self._client = client
         self._concurrency = concurrency
         self._name_ttl = name_ttl_seconds
         self._people_ttl = people_ttl_seconds
-        self._names = {kind: _Memo(name_ttl_seconds) for kind in NAME_LOOKUPS}
+        self._kinds: dict[str, tuple[str, str, str]] = {**NAME_LOOKUPS, **dict(kinds or {})}
+        for kind, spec in self._kinds.items():
+            if len(spec) != 3 or not all(isinstance(part, str) and part for part in spec):
+                raise ValueError(f"lookup kind {kind!r} needs (resource, id field, name field)")
+        self._names = {kind: _Memo(name_ttl_seconds) for kind in self._kinds}
         self._people = _Memo(people_ttl_seconds)
         self._positions = _Memo(name_ttl_seconds)
         self._store = store
         self._background: set[asyncio.Task[Any]] = set()
+
+    @property
+    def kinds(self) -> dict[str, tuple[str, str, str]]:
+        """Every kind this instance can name: ``{kind: (resource, id, name)}``."""
+        return dict(self._kinds)
 
     def clear(self) -> None:
         """Forget every answer held in MEMORY (after a catalogue edit, or in
@@ -264,7 +279,7 @@ class OracleLookups:
     ) -> dict[str, str]:
         """Ask Oracle. ``{id: name}`` for every id that ANSWERED, ``""`` for one
         Oracle does not know; ids whose request failed are absent."""
-        resource, key, name_field = NAME_LOOKUPS[kind]
+        resource, key, name_field = self._kinds[kind]
 
         async def fetch(value: str) -> tuple[str, str]:
             async with limit:
@@ -305,11 +320,12 @@ class OracleLookups:
         *,
         semaphore: asyncio.Semaphore | None = None,
     ) -> dict[str, str]:
-        """``{id: Oracle's name}`` for one kind (see :data:`NAME_LOOKUPS`).
+        """``{id: Oracle's name}`` for one kind (:data:`NAME_LOOKUPS`, plus any
+        the constructor was given in ``kinds``).
 
         Ids Oracle does not know, and ids whose lookup failed, are absent from
         the answer rather than mapped to ``""``."""
-        if kind not in NAME_LOOKUPS:
+        if kind not in self._kinds:
             raise ValueError(f"no Oracle name lookup for {kind!r}")
         memo = self._names[kind]
         now = time.monotonic()
@@ -526,8 +542,14 @@ class OracleLookups:
         try:
             for field_name in ("WorkEmail", "Username"):
                 for value in spellings:
+                    try:
+                        clause = eq(field_name, value)
+                    except OracleQueryError:
+                        # An address the q grammar cannot express (a quote in
+                        # it) cannot be looked up this way: no match, no guess.
+                        continue
                     rows, _, _ = await self._client.get_collection(
-                        WORKERS, {**params, "q": eq(field_name, value)}
+                        WORKERS, {**params, "q": clause}
                     )
                     if rows:
                         return rows[0]

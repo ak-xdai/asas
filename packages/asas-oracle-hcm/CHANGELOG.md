@@ -58,4 +58,24 @@ resources a product reads and which it caches stay with the product.
   writes are listed and never called, no body is printed. The default manifest
   is the HCM reference reads; `examples/recruiting-probes.json` is a recruiting
   one.
+- **Credentials are a seam** (`Auth`): `BasicAuth`, `ApiKeyAuth`,
+  `BearerToken`, `OAuthClientCredentials` (a client-credentials token, cached,
+  refreshed before expiry and renewed after a 401 with one retry) and
+  `CompositeAuth`, built by `OracleSettings.auth()` from the settings
+  (`oauth_*` fields), or passed as `auth=`. Basic and OAuth are refused
+  together; no credential ever reaches a log or an exception.
+- **Breakers per resource plus one for the host** (`BreakerPolicy`), counting
+  only real outages (`is_outage`: no response, 502/503/504, 429). A 500 is an
+  answer, so one broken operation cannot switch every read off.
+- **`OracleAuthError`** for 401/403 (never transient, never an outage) and
+  **`retry_after_seconds`** on a 429/503.
+- **`OracleQueryError`**: `eq`, `like` and `literal` refuse a quote or a `;`
+  instead of guessing (an unquoted value must be a plain id; field names must
+  be attribute names), so caller input cannot widen a query.
+  `strip_quotes=True` is the explicit opt-in for free text.
+- **`client.request(...)`** is public, with `raise_for_status` and `guard`;
+  the gateway check uses it instead of the client's internals.
+- **`OracleLookups(kinds=...)`** adds a host's own id kinds; **`extra_headers`**
+  ride on every request; an **`on_request`** hook sees every request
+  (`RequestEvent`).
 - Depends on `httpx` only.
