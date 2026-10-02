@@ -1,0 +1,25 @@
+{
+  "probes": [
+    {"path": "/recruitingJobRequisitions", "params": {"limit": 1}, "provides": {"RequisitionNumber": "RequisitionNumber"}},
+    {"path": "/recruitingJobRequisitionsLOV", "params": {"limit": 1}},
+    {"path": "/recruitingHierarchyLocations", "params": {"limit": 1}},
+    {"path": "/recruitingCandidates", "params": {"limit": 25}, "provides": {"CandidateNumber": "CandidateNumber"}},
+    {"path": "/recruitingJobApplications", "params": {"limit": 1}},
+    {"path": "/publicWorkers", "params": {"limit": 1}},
+    {"path": "/grades", "params": {"limit": 1}},
+    {"path": "/departments", "params": {"limit": 1}},
+    {"path": "/hcmBusinessUnitsLOV", "params": {"limit": 1}},
+    {"path": "/organizations", "params": {"limit": 1}},
+    {"path": "/jobs", "params": {"limit": 1}},
+    {"path": "/positions", "params": {"limit": 1}},
+    {"path": "/jobFamilies", "params": {"limit": 1}},
+    {"path": "/recruitingJobRequisitions/{RequisitionNumber}"},
+    {"path": "/recruitingJobRequisitions/{RequisitionNumber}/child/requisitionDFF"},
+    {"path": "/recruitingCandidates/{CandidateNumber}"},
+    {"path": "/recruitingCandidates/{CandidateNumber}/child/attachments", "params": {"onlyData": "false", "limit": 25},
+     "provides": {"AttachmentKey": "@enclosure_key"}, "tries": 25},
+    {"path": "/recruitingCandidates/{CandidateNumber}/child/attachments/{AttachmentKey}/enclosure/FileContents", "binary": true},
+    {"label": "POST /recruitingJobRequisitions", "call": false},
+    {"label": "PATCH /recruitingJobRequisitions/{RequisitionNumber}", "call": false}
+  ]
+}

@@ -1,11 +1,11 @@
 """Asas Oracle Fusion HCM: an async REST client for Oracle Fusion, with the
 instance's traps written down once.
 
-Extracted from a product's working integration (the AI Recruiter's
-``oracle_hcm`` module) and generalised: settings are an explicit object, the
-read cache is a seam with an in-memory default instead of a Redis import, and
-every recruiting rule (what "approved" means, how a row maps onto the
-product's schema) stayed behind.
+Domain-agnostic: it knows Fusion (the query grammar, the media types, the
+limits, the HCM reference data every product resolves ids against) and nothing
+about what a product does with it. Recruiting, core HR, absence or payroll
+integrations all build on the same client; which resources a product reads,
+what a row means and which of them it caches are the product's.
 
 Public surface: a **table-less, router-less** package that fills none of the
 four host-contract slots. Everything is an object the host constructs:
@@ -26,14 +26,15 @@ four host-contract slots. Everything is an object the host constructs:
   :class:`OracleUnavailableError` during an outage, per-resource call
   statistics (``client.health.snapshot()``), and :func:`count_calls` to count
   the Oracle requests one host request made.
-- :mod:`asas_oracle_hcm.check` (``asas-oracle-check``): every recruiting read
-  called once, for verifying a gateway registration.
+- :mod:`asas_oracle_hcm.check` (``asas-oracle-check``): each read a deployment
+  depends on called once, from a manifest of :class:`Probe` s, for verifying a
+  gateway registration (the HCM reference reads by default).
 - ``query``: the ``q`` grammar (:func:`eq`, :func:`like`, :func:`and_`,
   :func:`literal`) and row readers (:func:`text`, :func:`flag`,
   :func:`integer`, :func:`child_items`).
-- Recruiting helpers that respect Oracle's own caps: :func:`candidate_page`,
-  :func:`candidate_attachments`, :func:`enclosure_key`,
-  :func:`download_attachment`.
+- Fusion's paging limits and attachments, on any resource:
+  :func:`capped_page` (the page cap and the offset ceiling),
+  :func:`attachments`, :func:`enclosure_key`, :func:`download_enclosure`.
 - Errors: :class:`OracleError` > :class:`OracleConfigError`,
   :class:`OracleNotConfiguredError`, :class:`OracleUpstreamError` >
   :class:`OracleNotFoundError`, :class:`OracleAlreadyExistsError`,
@@ -42,7 +43,17 @@ four host-contract slots. Everything is an object the host constructs:
 
 from __future__ import annotations
 
-from .cache import Cache, CachePolicy, MemoryCache, NullCache
+from .attachments import attachments, download_enclosure, enclosure_key
+from .cache import (
+    LOOKUP_TTL_SECONDS,
+    REFERENCE_RESOURCES,
+    Cache,
+    CachePolicy,
+    MemoryCache,
+    NullCache,
+    reference_ttls,
+)
+from .check import REFERENCE_PROBES, CheckResult, Probe, check, load_manifest
 from .client import MAX_PAGE_SIZE, CollectionPage, OracleFusionClient
 from .errors import (
     OracleAlreadyExistsError,
@@ -66,15 +77,7 @@ from .lookups import (
     worker_address,
 )
 from .query import and_, child_items, eq, flag, integer, like, literal, text
-from .recruiting import (
-    CANDIDATE_MAX_PAGE_SIZE,
-    CANDIDATE_OFFSET_CEILING,
-    CandidatePage,
-    candidate_attachments,
-    candidate_page,
-    download_attachment,
-    enclosure_key,
-)
+from .paging import DEFAULT_OFFSET_CEILING, CappedPage, capped_page
 from .settings import OracleSettings
 from .store import LookupStore, MemoryLookupStore, StoredAnswer
 from .upstream import Breaker, CallCount, UpstreamHealth, count_calls
@@ -83,15 +86,16 @@ __version__ = "0.1.0"
 
 __all__ = [
     "Breaker",
-    "CANDIDATE_MAX_PAGE_SIZE",
-    "CANDIDATE_OFFSET_CEILING",
     "Cache",
     "CachePolicy",
     "CallCount",
-    "CandidatePage",
+    "CappedPage",
+    "CheckResult",
     "CollectionPage",
     "DEFAULT_CONCURRENCY",
+    "DEFAULT_OFFSET_CEILING",
     "DIRECTORY_KIND",
+    "LOOKUP_TTL_SECONDS",
     "LookupStore",
     "MAX_PAGE_SIZE",
     "MemoryCache",
@@ -111,23 +115,28 @@ __all__ = [
     "POSITION_BUDGET_KIND",
     "Person",
     "Position",
+    "Probe",
+    "REFERENCE_PROBES",
+    "REFERENCE_RESOURCES",
     "SCRUBBED_WORK_EMAIL",
     "StoredAnswer",
     "UpstreamHealth",
     "WorkerDepartment",
-    "__version__",
     "and_",
-    "candidate_attachments",
-    "candidate_page",
+    "attachments",
+    "capped_page",
+    "check",
     "child_items",
     "count_calls",
-    "download_attachment",
+    "download_enclosure",
     "enclosure_key",
     "eq",
     "flag",
     "integer",
     "like",
     "literal",
+    "load_manifest",
+    "reference_ttls",
     "text",
     "worker_address",
     "__version__",

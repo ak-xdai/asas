@@ -93,7 +93,7 @@ def test_a_successful_probe_closes_it_and_only_one_probe_goes_out(make_client, o
 
 
 def test_a_404_or_a_400_is_an_answer_not_a_fault(make_client, oracle):
-    oracle.route("/recruitingJobRequisitions/missing", (404, {}))
+    oracle.route("/workers/missing", (404, {}))
     oracle.route("/grades", (400, {}))
     breaker, _ = _breaker()
     client = make_client(breaker=breaker)
@@ -101,7 +101,7 @@ def test_a_404_or_a_400_is_an_answer_not_a_fault(make_client, oracle):
     async def go():
         for _ in range(5):
             with pytest.raises(OracleNotFoundError):
-                await client.get("/recruitingJobRequisitions/missing")
+                await client.get("/workers/missing")
             with pytest.raises(OracleUpstreamError):
                 await client.get("/grades")
 

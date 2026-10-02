@@ -60,7 +60,7 @@ class OracleAlreadyExistsError(OracleUpstreamError):
     """Oracle refused a create because a key the CALLER minted is taken.
 
     Its own class because it is the one refusal that can mean success: when the
-    caller chooses the key (a requisition number, say) and retries a create,
+    caller chooses the key (a record number it mints itself) and retries a create,
     this answer says the first attempt landed. The caller reads the record back
     by that key. On a first attempt it means a genuine collision."""
 

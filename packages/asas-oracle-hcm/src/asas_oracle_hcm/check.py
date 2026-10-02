@@ -1,73 +1,127 @@
-"""Call every Oracle recruiting read once, and say how each one answered.
+"""Call each Fusion read a deployment depends on once, and say how it answered.
 
 A deployment that reaches Fusion through an API gateway registers each
 operation on its own (registered, tested and activated one by one), so "the
-gateway works" is eighteen facts, not one. This walks the reads in the order a
-path parameter becomes available (a requisition number from the list, then its
-record and descriptive flexfield; a candidate number, then the attachments and
-one file), with the host's own settings, so what it checks is what the host
-would send: the base URL, the gateway key header, and Basic auth only when a
-username is set.
+gateway works" is one fact per operation. This walks a MANIFEST of probes in
+order, with the host's own settings, so what it checks is what the host would
+send: the base URL, the gateway key header, and Basic auth only when a username
+is set.
 
-It never prints a body. The HTTP status, the gateway's or Oracle's error text
+It never prints a body. The HTTP status, the gateway's or Fusion's error text
 trimmed to one line, a row count and the time taken: enough to tell a missing
 registration (a 404 from the gateway) from a refused key (401/403), a transport
-the gateway was not registered for, and a fault behind it (5xx). The two writes
-(POST and PATCH on requisitions) are listed and deliberately NOT called: a
-check must not create or change a requisition in somebody's HCM.
+the gateway was not registered for, and a fault behind it (5xx). A write in the
+manifest is listed and never called: a check must not change somebody's HCM.
 
-From a shell, configured like :meth:`OracleSettings.from_env`::
+**A probe can depend on an earlier answer.** ``provides`` names values to take
+from a read's rows (``{"PersonId": "PersonId"}``), and a later probe's path
+uses them (``/publicWorkers/{PersonId}``). Every row's value is collected, and
+``tries`` lets a probe walk several of them until one answers what IT provides:
+"the first record that has an attachment" is a listing that provides the key,
+then an attachments probe with ``tries=25`` that provides ``"@enclosure_key"``.
 
-    ORACLE_HCM_BASE_URL=... ORACLE_HCM_GATEWAY_API_KEY=... asas-oracle-check
+The default manifest (:data:`REFERENCE_PROBES`) is the HCM reference reads the
+lookups use. A product passes its own, in code or as JSON::
+
+    asas-oracle-check --manifest probes.json
+
+    {"probes": [
+      {"path": "/workers", "params": {"limit": 5}, "provides": {"PersonId": "PersonId"}},
+      {"path": "/workers/{PersonId}/child/attachments", "params": {"onlyData": "false"},
+       "provides": {"Key": "@enclosure_key"}, "tries": 5},
+      {"path": "/workers/{PersonId}/child/attachments/{Key}/enclosure/FileContents", "binary": true},
+      {"label": "PATCH /workers/{PersonId}", "call": false}
+    ]}
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import re
 import sys
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from .attachments import enclosure_key
 from .client import OracleFusionClient
-from .recruiting import enclosure_key
+from .lookups import NAME_LOOKUPS
 from .settings import OracleSettings
 
-#: The registered collection reads, in call order.
-LISTS: tuple[str, ...] = (
-    "/recruitingJobRequisitions",
-    "/recruitingJobRequisitionsLOV",
-    "/recruitingHierarchyLocations",
-    "/recruitingCandidates",
-    "/recruitingJobApplications",
-    "/publicWorkers",
-    "/grades",
-    "/departments",
-    "/hcmBusinessUnitsLOV",
-    "/organizations",
-    "/jobs",
-    "/positions",
-    "/jobFamilies",
-)
-#: The reads addressed by a key an earlier answer supplies.
-BY_KEY: tuple[str, ...] = (
-    "/recruitingJobRequisitions/{RequisitionNumber}",
-    "/recruitingJobRequisitions/{RequisitionNumber}/child/requisitionDFF",
-    "/recruitingCandidates/{CandidateNumber}",
-    "/recruitingCandidates/{CandidateNumber}/child/attachments",
-    "/recruitingCandidates/{CandidateNumber}/child/attachments/{AttachmentKey}/enclosure/FileContents",
-)
-#: Listed, never called.
-NOT_CALLED: tuple[str, ...] = (
-    "POST /recruitingJobRequisitions",
-    "PATCH /recruitingJobRequisitions/{RequisitionNumber}",
-)
-#: How many candidates are searched for one with an attachment, so the file
-#: read can be exercised (many candidates on a test pod carry none).
-ATTACHMENT_SEARCH = 25
+#: ``provides`` value meaning "the enclosure key in a row's links".
+ENCLOSURE_KEY = "@enclosure_key"
+
+_PLACEHOLDER = re.compile(r"\{([A-Za-z0-9_]+)\}")
+
+
+@dataclass(frozen=True)
+class Probe:
+    """One operation to check.
+
+    ``path`` may hold ``{Name}`` placeholders an earlier probe ``provides``.
+    ``call=False`` lists the operation without calling it (a write); ``label``
+    is what is printed (defaults to the path). ``binary`` reads an enclosure
+    (``Accept: */*``, no ``onlyData``). ``tries`` is how many of a
+    placeholder's collected values the probe may walk before giving up."""
+
+    path: str = ""
+    params: Mapping[str, Any] = field(default_factory=dict)
+    provides: Mapping[str, str] = field(default_factory=dict)
+    tries: int = 1
+    binary: bool = False
+    call: bool = True
+    label: str = ""
+
+    @property
+    def name(self) -> str:
+        return self.label or self.path
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> Probe:
+        unknown = set(raw) - {"path", "params", "provides", "tries", "binary", "call", "label"}
+        if unknown:
+            raise ValueError(f"unknown probe fields: {sorted(unknown)}")
+        probe = cls(
+            path=str(raw.get("path", "")),
+            params=dict(raw.get("params") or {}),
+            provides=dict(raw.get("provides") or {}),
+            tries=int(raw.get("tries", 1)),
+            binary=bool(raw.get("binary", False)),
+            call=bool(raw.get("call", True)),
+            label=str(raw.get("label", "")),
+        )
+        if probe.call and not probe.path:
+            raise ValueError("a probe that is called needs a path")
+        if probe.tries < 1:
+            raise ValueError("tries must be at least 1")
+        return probe
+
+
+def _reference_probes() -> tuple[Probe, ...]:
+    seen: list[str] = []
+    for resource, _key, _name in NAME_LOOKUPS.values():
+        if resource not in seen:
+            seen.append(resource)
+    return tuple(Probe(path=r, params={"limit": 1}) for r in seen)
+
+
+#: The HCM reference reads the lookups depend on, one row each.
+REFERENCE_PROBES: tuple[Probe, ...] = _reference_probes()
+
+
+def load_manifest(path: str | Path) -> list[Probe]:
+    """Probes from a JSON file: ``{"probes": [{...}, ...]}`` or a bare list."""
+    raw = json.loads(Path(path).read_text())
+    items = raw.get("probes") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        raise ValueError("a manifest is a list of probes, or {'probes': [...]}")
+    return [Probe.from_dict(item) for item in items]
 
 
 @dataclass
@@ -81,20 +135,29 @@ class CheckResult:
     def ok(self) -> bool:
         return self.status.startswith("2")
 
+    @property
+    def called(self) -> bool:
+        return self.status not in ("skipped", "not called")
+
 
 def _one_line(value: str, limit: int = 160) -> str:
     return " ".join((value or "").split())[:limit]
 
 
-async def _get(client: OracleFusionClient, path: str, params: dict[str, Any], *, binary: bool = False) -> tuple[CheckResult, Any]:
+async def _get(
+    client: OracleFusionClient, path: str, params: Mapping[str, Any], *, binary: bool
+) -> tuple[CheckResult, Any]:
     http = client._http()
     headers = client._headers()
+    query = dict(params)
     if binary:
         headers["Accept"] = "*/*"
+    else:
+        query.setdefault("onlyData", "true")
     started = time.perf_counter()
     try:
         response = await http.get(
-            client._url(path), params=params, headers=headers, auth=client._settings.basic_auth
+            client._url(path), params=query, headers=headers, auth=client._settings.basic_auth
         )
     except httpx.HTTPError as exc:
         return CheckResult(path, "unreachable", _one_line(f"{type(exc).__name__}: {exc}")), None
@@ -112,67 +175,68 @@ async def _get(client: OracleFusionClient, path: str, params: dict[str, Any], *,
     return CheckResult(path, str(response.status_code), detail, ms), body
 
 
-def _first(body: Any, field: str) -> list[str]:
-    items = body.get("items") if isinstance(body, dict) else None
-    return [str(r[field]) for r in items or [] if isinstance(r, dict) and r.get(field) not in (None, "")]
+def _rows(body: Any) -> list[dict[str, Any]]:
+    if isinstance(body, dict) and isinstance(body.get("items"), list):
+        return [r for r in body["items"] if isinstance(r, dict)]
+    return [body] if isinstance(body, dict) else []
 
 
-async def check(client: OracleFusionClient, *, limit: int = 1) -> list[CheckResult]:
-    """One result per registered operation, reads called and writes listed."""
+def _collect(body: Any, provides: Mapping[str, str]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for name, source in provides.items():
+        values: list[str] = []
+        for row in _rows(body):
+            value = enclosure_key(row) if source == ENCLOSURE_KEY else row.get(source)
+            if value not in (None, "") and str(value) not in values:
+                values.append(str(value))
+        out[name] = values
+    return out
+
+
+async def check(
+    client: OracleFusionClient, probes: Sequence[Probe] = REFERENCE_PROBES
+) -> list[CheckResult]:
+    """One result per probe: reads called in order, writes listed."""
     if not client.configured:
         return [CheckResult("(configuration)", "not configured", "no base URL")]
+    found: dict[str, list[str]] = {}
     results: list[CheckResult] = []
-    found: dict[str, str] = {}
-    candidates: list[str] = []
-    for path in LISTS:
-        size = ATTACHMENT_SEARCH if path == "/recruitingCandidates" else limit
-        result, body = await _get(client, path, {"limit": size, "onlyData": "true"})
-        results.append(result)
-        if path == "/recruitingJobRequisitions":
-            found["RequisitionNumber"] = next(iter(_first(body, "RequisitionNumber")), "")
-        elif path == "/recruitingCandidates":
-            candidates = _first(body, "CandidateNumber")
-            found["CandidateNumber"] = next(iter(candidates), "")
-    for template in BY_KEY:
-        if template.endswith("/child/attachments"):
-            if not candidates:
-                results.append(CheckResult(template, "skipped", "no CandidateNumber to call it with"))
-                continue
-            # The attachment listing of the first candidate that has one, so
-            # the file read below can be exercised.
-            first: CheckResult | None = None
-            for number in candidates:
-                result, body = await _get(
-                    client, f"/recruitingCandidates/{number}/child/attachments",
-                    {"onlyData": "false", "limit": 25},
-                )
-                first = first or result
-                rows = body.get("items") if isinstance(body, dict) else None
-                key = next((k for r in rows or [] if (k := enclosure_key(r))), "")
-                if key:
-                    found["CandidateNumber"], found["AttachmentKey"] = number, key
-                    first = result
-                    break
-                if not result.ok:
-                    break
-            assert first is not None
-            first.operation = template
-            results.append(first)
+    for probe in probes:
+        if not probe.call:
+            results.append(CheckResult(probe.name, "not called", "a write; a check must not change Oracle"))
             continue
-        if "{AttachmentKey}" in template and not found.get("AttachmentKey"):
-            results.append(CheckResult(template, "skipped", "no candidate with an attachment"))
-            continue
-        missing = [k for k in ("RequisitionNumber", "CandidateNumber") if "{" + k + "}" in template and not found.get(k)]
+        needed = _PLACEHOLDER.findall(probe.path)
+        missing = [n for n in needed if not found.get(n)]
         if missing:
-            results.append(CheckResult(template, "skipped", f"no {missing[0]} to call it with"))
+            results.append(CheckResult(probe.name, "skipped", f"no {missing[0]} to call it with"))
             continue
-        path = template.format(**found)
-        binary = template.endswith("/enclosure/FileContents")
-        result, _ = await _get(client, path, {} if binary else {"onlyData": "true"}, binary=binary)
-        result.operation = template
-        results.append(result)
-    for operation in NOT_CALLED:
-        results.append(CheckResult(operation, "not called", "a write; a check must not change Oracle"))
+        # Walk the first placeholder's values (up to `tries`); the others are
+        # bound to their first value.
+        varying = needed[0] if needed else None
+        choices = found[varying][: probe.tries] if varying else [""]
+        last: CheckResult | None = None
+        for choice in choices:
+            values = {n: found[n][0] for n in needed}
+            if varying:
+                values[varying] = choice
+            path = probe.path.format(**values)
+            result, body = await _get(client, path, probe.params, binary=probe.binary)
+            result.operation = probe.name
+            last = result
+            if not result.ok:
+                break
+            got = _collect(body, probe.provides)
+            if all(got.get(n) for n in probe.provides):
+                for name, vals in got.items():
+                    found[name] = vals
+                if varying:
+                    # Later probes use the value that answered.
+                    found[varying] = [choice] + [v for v in found[varying] if v != choice]
+                break
+        assert last is not None
+        if last.ok and probe.provides and not all(found.get(n) for n in probe.provides):
+            last.detail += f"; none of {len(choices)} provided {', '.join(probe.provides)}"
+        results.append(last)
     return results
 
 
@@ -183,29 +247,37 @@ def render(settings: OracleSettings, results: list[CheckResult]) -> str:
         f"base URL : {settings.base_url or '(empty)'}",
         f"API key  : {settings.gateway_api_key_header} ({key}); Basic auth {basic}",
     ]
-    width = max(len(r.operation) for r in results)
+    width = max((len(r.operation) for r in results), default=10)
     for r in results:
         timing = f"{r.ms:>6} ms" if r.ms else " " * 9
         lines.append(f"{r.operation:<{width}}  {r.status:<14} {timing}  {r.detail}")
-    called = [r for r in results if r.status not in ("skipped", "not called")]
+    called = [r for r in results if r.called]
     lines.append(f"{sum(r.ok for r in called)} of {len(called)} calls answered 2xx")
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--prefix", default="ORACLE_HCM_", help="environment variable prefix")
-    parser.add_argument("--limit", type=int, default=1, help="rows asked of each list")
+    parser.add_argument("--manifest", help="a JSON manifest of probes (default: the HCM reference reads)")
+    parser.add_argument("--path", action="append", default=[], help="a read to probe (repeatable), instead of a manifest")
     args = parser.parse_args(argv)
+    if args.manifest and args.path:
+        parser.error("pass --manifest or --path, not both")
+    probes: Sequence[Probe] = REFERENCE_PROBES
+    if args.manifest:
+        probes = load_manifest(args.manifest)
+    elif args.path:
+        probes = [Probe(path=p, params={"limit": 1}) for p in args.path]
     settings = OracleSettings.from_env(args.prefix)
 
     async def go() -> list[CheckResult]:
         async with OracleFusionClient(settings) as client:
-            return await check(client, limit=args.limit)
+            return await check(client, probes)
 
     results = asyncio.run(go())
     print(render(settings, results))
-    called = [r for r in results if r.status not in ("skipped", "not called")]
+    called = [r for r in results if r.called]
     return 0 if called and all(r.ok for r in called) else 1
 
 

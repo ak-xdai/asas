@@ -7,7 +7,15 @@ that integrates Fusion rediscovers the same things (there is no working OR,
 several ids in one query return 500, test pods scrub every work email, a
 duplicate key comes back as a 400 with prose); they are solved here.
 
-Nothing in it is about any one product. It is a **table-less, router-less**
+**It is domain-agnostic.** It knows Fusion (the query grammar, the media
+types, the paging limits, attachments, and the HCM reference data every product
+resolves ids against: grades, departments, business units, organizations, jobs,
+positions, job families, workers) and nothing about what a product does with
+it. A recruiting, core HR, absence or payroll integration builds on the same
+client; which resources it reads, what a row means and which of them it caches
+are the product's.
+
+It is a **table-less, router-less**
 Asas package: it fills none of the four host-contract slots (no routers, no
 schema, no seeding, no `configure_*` globals). Everything is an object the host
 constructs and owns, so a process that talks to two instances makes two
@@ -26,15 +34,15 @@ lookups = oracle.OracleLookups(client)        # ONE per process: it remembers an
 
 # use
 page = await client.get_collection(
-    "/recruitingJobRequisitions",
+    "/positions",
     {"q": oracle.and_(oracle.eq("BusinessUnitId", bu, quote=False),
-                      oracle.like("Title", "architect")),
+                      oracle.like("Name", "architect")),
      "limit": 25, "totalResults": "true"},
 )
 page.items, page.has_more, page.total          # total is None when Oracle declines to count
 
-names = await lookups.names("grade", [row["GradeId"] for row in page.items])
-people = await lookups.people([row["HiringManagerId"] for row in page.items])
+names = await lookups.names("job", [row["JobId"] for row in page.items])
+people = await lookups.people([row["ManagerPersonId"] for row in page.items])
 where = await lookups.worker_department("jane@example.gov")   # WorkerDepartment | None
 
 # shutdown
@@ -89,8 +97,9 @@ path relative to the REST root.
   `application/vnd.oracle.adf.resourceitem+json`. Each refuses the other's
   media type.
 - A field list NARROWS a response: ask for no projection when you need the
-  phase and state NAMES on a requisition, because `fields=...StateId` drops
-  them and leaves ids nothing resolves.
+  names Fusion denormalises beside a record's ids (a `PhaseName` beside a
+  `PhaseId`), because `fields=...PhaseId` drops them and leaves ids nothing
+  resolves.
 
 **No retries.** Whether and when to retry is host policy. A PATCH by id is
 idempotent and safe for a caller to retry; a transition such as
@@ -128,18 +137,39 @@ log.info("request", path=request.url.path, oracle_calls=counted.calls)
 
 ## Checking a gateway registration
 
-A gateway registers each operation on its own, so "the gateway works" is
-eighteen facts. `asas-oracle-check` (or `asas_oracle_hcm.check.check(client)`)
-calls every recruiting read once, in the order a key becomes available, with
-your own settings, and prints the status, a one-line error, a row count and the
-time for each. It tells a missing registration (404 from the gateway) from a
-refused key (401/403), a transport the gateway was not registered for, and a
-fault behind it (5xx). It never prints a body, and the two writes are listed,
-never called.
+A gateway registers each operation on its own, so "the gateway works" is one
+fact per operation. `asas-oracle-check` (or `check(client, probes)`) calls each
+read in a manifest once, with your own settings, and prints the status, a
+one-line error, a row count and the time for each. It tells a missing
+registration (404 from the gateway) from a refused key (401/403), a transport
+the gateway was not registered for, and a fault behind it (5xx). It never
+prints a body, and a write in the manifest is listed, never called.
+
+The default manifest is the HCM reference reads the lookups use
+(`REFERENCE_PROBES`). Pass your product's own with `--manifest probes.json`, or
+a few reads with `--path /workers --path /absences`. A probe can take values
+from an earlier answer: `provides` collects a field from the rows
+(`{"PersonId": "PersonId"}`, or `"@enclosure_key"` for an attachment's key),
+a later path uses them (`/workers/{PersonId}`), and `tries` lets a probe walk
+several values until one answers what it provides ("the first worker with an
+attachment"):
+
+```json
+{"probes": [
+  {"path": "/workers", "params": {"limit": 5}, "provides": {"PersonId": "PersonId"}},
+  {"path": "/workers/{PersonId}/child/attachments", "params": {"onlyData": "false"},
+   "provides": {"Key": "@enclosure_key"}, "tries": 5},
+  {"path": "/workers/{PersonId}/child/attachments/{Key}/enclosure/FileContents", "binary": true},
+  {"label": "PATCH /workers/{PersonId}", "call": false}
+]}
+```
+
+[`examples/recruiting-probes.json`](examples/recruiting-probes.json) is the
+manifest for an Oracle Recruiting integration (18 reads, 2 writes listed).
 
 ```
 ORACLE_HCM_BASE_URL=https://gateway.example/OIC/1.0 ORACLE_HCM_GATEWAY_API_KEY=... \
-  ORACLE_HCM_GATEWAY_API_KEY_HEADER=x-CentraSite-APIKey asas-oracle-check
+  ORACLE_HCM_GATEWAY_API_KEY_HEADER=x-CentraSite-APIKey asas-oracle-check --manifest probes.json
 ```
 
 ## The query language
@@ -218,13 +248,21 @@ address there.
 ## The read cache
 
 Reads are cached per a `CachePolicy` over a `Cache`. The default policy caches
-reference data (grades, departments, business units, organizations, jobs,
-positions, job families, workers) for six hours, the recruiting geography for
-fifteen minutes and requisitions for two, and never caches candidates,
-applications or attachments. A POST or PATCH on a requisition makes cached
-requisition reads stale at once (a version in the key, bumped on write). An
-EMPTY collection is kept for ten minutes at most, so a new hire does not read
-as nobody until tomorrow.
+the HCM reference data (`REFERENCE_RESOURCES`: grades, departments, business
+units, organizations, jobs, positions, job families, workers) for six hours
+and nothing else: which of its OWN resources a product caches, and for how
+long, is the product's call. `stale_on_write` says which cached resources a
+POST or PATCH makes stale at once (a version in the key, bumped on write):
+
+```python
+oracle.CachePolicy(
+    ttls={**oracle.reference_ttls(), "absences": 120, "absencesLOV": 120},
+    stale_on_write={"absences": ("absences", "absencesLOV")},
+)
+```
+
+An EMPTY collection is kept for ten minutes at most, whatever its resource's
+TTL, so a new hire does not read as nobody until tomorrow.
 
 The default store is `MemoryCache` (per process); `NullCache` turns caching
 off. For a store every replica shares, implement the four async methods of the
@@ -236,19 +274,23 @@ share one store.
 to Oracle whatever the cache holds and stores nothing: use it from any layer
 above the client that has decided its own copy is out of date.
 
-## Recruiting helpers
+## Paging limits and attachments
 
-Oracle's own limits, not any product's; they return raw rows.
+Fusion's own limits, on any resource; both return raw rows.
 
-- `candidate_page(client, limit, offset, q=None)`: `/recruitingCandidates`
-  refuses a page over 200 and any offset at or past 10,000, and refuses the
-  WHOLE request when `offset + limit` crosses the ceiling. This clamps, trims
-  the last page and flags `at_ceiling` (Oracle reports `hasMore=false` there,
-  which does not mean the last candidate).
-- `candidate_attachments(client, number, category=None)` keeps the `links`
-  (the enclosure key lives only there); `enclosure_key(row)` extracts it;
-  `download_attachment(client, number, key)` reads the file. The rows carry a
-  signed `FileUrl`: never forward it to a browser.
+- `capped_page(client, path, limit=25, offset=0, params=None, page_cap=200,
+  offset_ceiling=None)`: Fusion REFUSES a page over its cap, and on resources
+  with an offset ceiling (10,000, `DEFAULT_OFFSET_CEILING`) any offset at or
+  past it, and the WHOLE request when `offset + limit` crosses it. This
+  clamps, trims the last reachable page, answers past the ceiling without
+  asking, and flags `at_ceiling` (Fusion reports `hasMore=false` there, which
+  does not mean the last row). Past the ceiling, slice the collection with `q`.
+- `attachments(client, record_path, category=None)` lists a record's files
+  (`/workers/<id>`, `/documentRecords/<id>`, any resource with a
+  `child/attachments`), keeping the `links`: the enclosure key lives only there.
+  `enclosure_key(row)` extracts it; `download_enclosure(client, record_path,
+  key)` reads the bytes. The rows carry a signed `FileUrl`: never forward it to
+  a browser.
 
 ## Errors
 
@@ -272,5 +314,5 @@ Pass `http=httpx.AsyncClient(transport=httpx.MockTransport(handler))` and,
 usually, `cache=NullCache()`; nothing leaves the process. The package's own
 `tests/conftest.py` has a routing fake worth copying.
 
-See the repo README for the family contract. Extracted from the AI Recruiter's
-`oracle_hcm` module.
+See the repo README for the family contract. Extracted from a product's
+working Fusion integration and generalised; nothing product-specific stayed.

@@ -7,10 +7,11 @@ Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASI
 
 ## 0.1.0 (unreleased)
 
-First release. Extracted from the AI Recruiter's `oracle_hcm` module
-(`OracleHcmClient` and the lookup functions in its service) and generalised;
-every recruiting rule (what "approved" means, the row mappers, the requisition
-import and sync) stayed behind.
+First release. Extracted from a product's working Oracle Fusion integration and
+generalised to be **domain-agnostic**: it knows Fusion (the query grammar, the
+media types, the paging limits, attachments, the HCM reference data) and
+nothing about recruiting or any other product. What a resource means, which
+resources a product reads and which it caches stay with the product.
 
 - **`OracleSettings`** replaces the product's settings import: an explicit
   object validated at construction, where an empty base URL means "Oracle is
@@ -20,18 +21,20 @@ import and sync) stayed behind.
   totals read as `None`), `iter_collection`, `get_bytes`, `post` and `patch`,
   each with the media type Oracle insists on. Errors are a typed hierarchy with
   no HTTP-status baggage and never carry Oracle's body.
-- **The read cache is a seam.** The product imported its own Redis module; here
-  a four-method `Cache` protocol with `MemoryCache` (default) and `NullCache`,
-  and a `CachePolicy` saying which resources are cached, for how long, and
-  which writes make them stale.
+- **The read cache is a seam.** A four-method `Cache` protocol with
+  `MemoryCache` (default) and `NullCache`, and a `CachePolicy` saying which
+  resources are cached, for how long, and which writes make them stale. The
+  default caches the HCM reference data alone (`reference_ttls()`); a product
+  adds its own resources.
 - **`OracleLookups`** holds what were module-level caches as instance state:
   id-to-name lookups for eight kinds, people by person id, a worker and their
   department by email address, and a reference set's departments.
 - The `q` grammar helpers and row readers, with the instance's traps (no OR,
   `;` for AND, no quote escaping, case-sensitive equality) documented.
-- Recruiting helpers that respect Oracle's own caps: `candidate_page` (200 per
-  page, 10,000 offset ceiling), `candidate_attachments`, `enclosure_key`,
-  `download_attachment`.
+- Fusion's paging limits and attachments on any resource: `capped_page` (the
+  page cap and the offset ceiling, `at_ceiling` where `hasMore=false` lies),
+  `attachments` (with the `links` the enclosure key lives in),
+  `enclosure_key`, `download_enclosure`.
 - **Upstream health.** A per-client `Breaker` makes reads fail at once with
   `OracleUnavailableError` after consecutive faults (transport, 5xx, 429),
   then lets one probe decide; writes are counted, never refused.
@@ -50,7 +53,9 @@ import and sync) stayed behind.
   cache. `MemoryLookupStore` is the in-process implementation.
 - **`OracleLookups.positions()`**: a position's name and budget flag in one
   request.
-- **`asas-oracle-check`** (`asas_oracle_hcm.check`): every recruiting read
-  called once, to verify a gateway registration. Never writes, never prints a
-  body.
+- **`asas-oracle-check`** (`check(client, probes)`): each read in a manifest
+  called once, to verify a gateway registration; values chain between probes,
+  writes are listed and never called, no body is printed. The default manifest
+  is the HCM reference reads; `examples/recruiting-probes.json` is a recruiting
+  one.
 - Depends on `httpx` only.

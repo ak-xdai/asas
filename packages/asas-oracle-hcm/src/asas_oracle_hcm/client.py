@@ -5,9 +5,10 @@ Worth knowing about the upstream:
 - ``onlyData=true`` strips the HATEOAS ``links`` block, which triples a
   payload. Every read sets it; a caller that needs the links (an attachment's
   enclosure key lives only there) passes ``onlyData="false"``.
-- A field list NARROWS the response. Ask for no projection and a requisition
-  comes back with its phase and state NAMES; ask for ``fields=...StateId`` and
-  the names are dropped, leaving bare ids that no lookup resolves.
+- A field list NARROWS the response. Ask for no projection and a record comes
+  back with the NAMES Fusion denormalises beside its ids (a ``PhaseName``
+  beside a ``PhaseId``); ask for ``fields=...PhaseId`` and the names are
+  dropped, leaving bare ids that no lookup resource resolves.
 - A PATCH wants ``application/vnd.oracle.adf.resourceitem+json`` and refuses
   plain JSON; a POST wants plain JSON and refuses the ADF type.
 - A duplicate key on a create comes back as a 400 with prose, not a 409, so the
@@ -52,8 +53,8 @@ from .upstream import Breaker, UpstreamHealth
 
 logger = logging.getLogger(__name__)
 
-#: Oracle's own page ceiling on most resources. Some cap lower (see
-#: :func:`asas_oracle_hcm.candidate_page`).
+#: Oracle's own page cap on most resources (see :mod:`asas_oracle_hcm.paging`
+#: for the cap and the offset ceiling).
 MAX_PAGE_SIZE = 200
 
 _ADF_ITEM = "application/vnd.oracle.adf.resourceitem+json"

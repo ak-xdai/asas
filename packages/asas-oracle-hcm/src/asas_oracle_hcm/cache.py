@@ -88,37 +88,36 @@ class NullCache:
 
 #: Reference data: an id and its name. Six hours.
 LOOKUP_TTL_SECONDS = 21_600
-#: The recruiting geography: thirty rows that never move. Fifteen minutes.
-LOCATION_TTL_SECONDS = 900
-#: A requisition and its list of values: brief, and made stale by any write.
-REQUISITION_TTL_SECONDS = 120
 #: How long an EMPTY collection is kept, whatever its resource's TTL. An empty
 #: answer (a person, a grade Oracle has not got yet) is the one most likely to
 #: change, and a new hire should not read as nobody until tomorrow.
 EMPTY_ANSWER_TTL_SECONDS = 600
 
-
-def _default_ttls() -> dict[str, int]:
-    lookups = (
-        "grades",
-        "departments",
-        "hcmBusinessUnitsLOV",
-        "organizations",
-        "jobs",
-        "positions",
-        "jobFamilies",
-        "publicWorkers",
-    )
-    ttls = {name: LOOKUP_TTL_SECONDS for name in lookups}
-    ttls["recruitingHierarchyLocations"] = LOCATION_TTL_SECONDS
-    ttls["recruitingJobRequisitions"] = REQUISITION_TTL_SECONDS
-    ttls["recruitingJobRequisitionsLOV"] = REQUISITION_TTL_SECONDS
-    return ttls
+#: The HCM reference resources the lookups read: ids and their names, which
+#: change on the scale of days.
+REFERENCE_RESOURCES: tuple[str, ...] = (
+    "grades",
+    "departments",
+    "hcmBusinessUnitsLOV",
+    "organizations",
+    "jobs",
+    "positions",
+    "jobFamilies",
+    "publicWorkers",
+)
 
 
-def _default_stale_on_write() -> dict[str, tuple[str, ...]]:
-    both = ("recruitingJobRequisitions", "recruitingJobRequisitionsLOV")
-    return {"recruitingJobRequisitions": both}
+def reference_ttls(seconds: int = LOOKUP_TTL_SECONDS) -> dict[str, int]:
+    """``{resource: ttl}`` for :data:`REFERENCE_RESOURCES`, the default policy.
+
+    A host caching its own resources too builds on it::
+
+        CachePolicy(
+            ttls={**reference_ttls(), "absences": 120},
+            stale_on_write={"absences": ("absences",)},
+        )
+    """
+    return {name: seconds for name in REFERENCE_RESOURCES}
 
 
 @dataclass(frozen=True)
@@ -127,13 +126,14 @@ class CachePolicy:
 
     ``ttls`` maps a resource name (the first path segment, ``grades`` in
     ``/grades?q=...``) to seconds; a resource not listed is never cached, which
-    is the right default for anything read to see what Oracle holds right now
-    (candidates, applications, attachments). ``stale_on_write`` maps a resource
-    to the resources a POST or PATCH on it invalidates: each carries a version
-    in its keys, and a write bumps it, so every cached read goes stale at once
-    without scanning keys.
+    is the right default for anything read to see what Oracle holds right now.
+    The default caches the HCM reference data alone (:func:`reference_ttls`);
+    which of its own resources a product caches, and for how long, is the
+    product's call. ``stale_on_write`` maps a resource to the resources a POST
+    or PATCH on it invalidates: each carries a version in its keys, and a write
+    bumps it, so every cached read goes stale at once without scanning keys.
     """
 
-    ttls: Mapping[str, int] = field(default_factory=_default_ttls)
-    stale_on_write: Mapping[str, tuple[str, ...]] = field(default_factory=_default_stale_on_write)
+    ttls: Mapping[str, int] = field(default_factory=reference_ttls)
+    stale_on_write: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     empty_answer_ttl_seconds: int = EMPTY_ANSWER_TTL_SECONDS

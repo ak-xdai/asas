@@ -3,7 +3,7 @@
 **One request per id, concurrently, and that is not a shortcut.** A Fusion pod
 answers a filtered lookup quickly (about 0.2s for a grade, 2s for a department)
 but refuses several ids in one query: ``IN (a,b)`` and an ``or`` chain both
-500, exactly as on the recruiting resources. Fetching a table whole is worse
+500, exactly as on Fusion's other filtered collections. Fetching a table whole is worse
 still: one 500-row page of grades took seventy seconds on a real instance, so
 the pages behind thousands of grades and departments would take most of an
 hour. Per id, bounded concurrency, remembered, is the only shape a real
@@ -29,15 +29,15 @@ from .store import LookupStore, StoredAnswer
 logger = logging.getLogger(__name__)
 
 #: How many lookups run at once. Measured against a real pod on the 25 people a
-#: page of requisitions names: sequential 10.9s, six at a time 5.8s, twelve at a
+#: page of 25 records names: sequential 10.9s, six at a time 5.8s, twelve at a
 #: time 1.6s with no failures. Twelve is where the curve flattens and is still a
 #: modest ask of a shared HR system.
 DEFAULT_CONCURRENCY = 12
 
 #: What each id kind is called upstream: ``(resource, id field, name field)``.
 #: ``department`` is keyed on ``OrganizationId``, NOT ``DepartmentId``: in
-#: Oracle's model a department IS an organization, and the id a requisition or
-#: an assignment carries as ``DepartmentId`` is that organization's id.
+#: Oracle's model a department IS an organization, and the id a record or an
+#: assignment carries as ``DepartmentId`` is that organization's id.
 NAME_LOOKUPS: dict[str, tuple[str, str, str]] = {
     "grade": ("/grades", "GradeId", "GradeName"),
     "department": ("/departments", "OrganizationId", "Name"),
@@ -519,13 +519,13 @@ class OracleLookups:
         address = (address or "").strip()
         if not address or "@" not in address or not self._client.configured:
             return None
-        candidates = list(dict.fromkeys([address, address.lower()]))
+        spellings = list(dict.fromkeys([address, address.lower()]))
         params: dict[str, Any] = {"limit": 1}
         if expand:
             params["expand"] = expand
         try:
             for field_name in ("WorkEmail", "Username"):
-                for value in candidates:
+                for value in spellings:
                     rows, _, _ = await self._client.get_collection(
                         WORKERS, {**params, "q": eq(field_name, value)}
                     )
