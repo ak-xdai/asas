@@ -19,10 +19,12 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from datetime import datetime, timezone
+from typing import Any, Callable, Coroutine, Mapping, Sequence
 
 from .client import MAX_PAGE_SIZE, OracleFusionClient
 from .query import and_, child_items, eq, flag, text
+from .store import LookupStore, StoredAnswer
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,11 @@ NAME_LOOKUPS: dict[str, tuple[str, str, str]] = {
 
 WORKERS = "/publicWorkers"
 DEPARTMENTS = "/departments"
+POSITIONS = "/positions"
+
+#: The store kinds this module writes besides the :data:`NAME_LOOKUPS` kinds.
+DIRECTORY_KIND = "directory"  # a person's name and address
+POSITION_BUDGET_KIND = "position_budget"  # BudgetedPositionFlag, "Y"/"N"/""
 
 #: The placeholder a NON-PRODUCTION Oracle pod writes over every worker's work
 #: address, so a test instance can never mail a real person. It is one address
@@ -80,6 +87,27 @@ class Person:
     person_id: str
     display_name: str
     address: str
+
+
+@dataclass(frozen=True)
+class Position:
+    """An HR position: its name and whether it is BUDGETED.
+
+    ``budgeted`` is ``None`` when Oracle left ``BudgetedPositionFlag`` unset,
+    which is not the same answer as ``False``."""
+
+    position_id: str
+    name: str
+    budgeted: bool | None
+
+
+def _budget_flag(value: Any) -> bool | None:
+    raw = str(value or "").strip().upper()
+    if raw in ("Y", "TRUE", "1"):
+        return True
+    if raw in ("N", "FALSE", "0"):
+        return False
+    return None
 
 
 @dataclass(frozen=True)
@@ -122,8 +150,14 @@ class OracleLookups:
     Hold ONE per process: it remembers answers (names for six hours, people for
     an hour by default), because a page of records points at the same handful
     of grades and people over and over. It deduplicates, so callers can pass
-    ids straight off their rows. Answers are also subject to the client's own
-    read cache; this memo is what saves the per-id fan-out itself.
+    ids straight off their rows.
+
+    Pass a :class:`LookupStore` to keep answers across processes and restarts
+    (see :mod:`asas_oracle_hcm.store` for the rules it gets: stale answers
+    served and refreshed in the background, negative answers kept, refreshes
+    that skip the client's read cache). The freshness windows are the same two
+    TTLs. Background refreshes are tasks this object holds; ``await
+    lookups.drain()`` waits for them (in tests, or before shutdown).
     """
 
     def __init__(
@@ -133,24 +167,136 @@ class OracleLookups:
         concurrency: int = DEFAULT_CONCURRENCY,
         name_ttl_seconds: float = 21_600.0,
         people_ttl_seconds: float = 3_600.0,
+        store: LookupStore | None = None,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
         self._client = client
         self._concurrency = concurrency
+        self._name_ttl = name_ttl_seconds
+        self._people_ttl = people_ttl_seconds
         self._names = {kind: _Memo(name_ttl_seconds) for kind in NAME_LOOKUPS}
         self._people = _Memo(people_ttl_seconds)
+        self._positions = _Memo(name_ttl_seconds)
+        self._store = store
+        self._background: set[asyncio.Task[Any]] = set()
 
     def clear(self) -> None:
-        """Forget every remembered answer (after a catalogue edit, or in tests)."""
+        """Forget every answer held in MEMORY (after a catalogue edit, or in
+        tests). The store, if any, is the store's to clear."""
         for memo in self._names.values():
             memo.clear()
         self._people.clear()
+        self._positions.clear()
+
+    async def drain(self) -> None:
+        """Wait for the background refreshes in flight."""
+        while self._background:
+            await asyncio.gather(*list(self._background), return_exceptions=True)
 
     def _semaphore(self) -> asyncio.Semaphore:
         return asyncio.Semaphore(self._concurrency)
 
+    # -- the store --------------------------------------------------------------
+
+    @property
+    def _use_cache(self) -> bool:
+        # With a store, the store is the shared layer and decides when Oracle
+        # must be asked; a client cache under it could only answer with a copy
+        # no newer than the one it just judged out of date.
+        return self._store is None
+
+    @staticmethod
+    def _fresh(answer: StoredAnswer, ttl: float) -> bool:
+        fetched = answer.fetched_at
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - fetched).total_seconds() < ttl
+
+    async def _read(self, kind: str, ids: Sequence[str]) -> Mapping[str, StoredAnswer]:
+        if self._store is None or not ids:
+            return {}
+        try:
+            return await self._store.read(kind, list(ids))
+        except Exception:  # noqa: BLE001 - a store is an accelerator, never a dependency
+            logger.warning("oracle lookup store read failed for %s", kind, exc_info=True)
+            return {}
+
+    async def _write(self, kind: str, answers: Mapping[str, tuple[str, Mapping[str, Any] | None]]) -> None:
+        if self._store is None or not answers:
+            return
+        try:
+            await self._store.write(kind, answers)
+        except Exception:  # noqa: BLE001
+            logger.warning("oracle lookup store write failed for %s", kind, exc_info=True)
+
+    def _refresh_later(self, make: Callable[[], Coroutine[Any, Any, Any]]) -> None:
+        try:
+            task: asyncio.Task[Any] = asyncio.get_running_loop().create_task(make())
+        except RuntimeError:  # pragma: no cover - no loop, nothing to schedule
+            return
+        self._background.add(task)
+
+        def done(t: asyncio.Task[Any]) -> None:
+            self._background.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("oracle lookup refresh failed", exc_info=t.exception())
+
+        task.add_done_callback(done)
+
+    def _split(
+        self, stored: Mapping[str, StoredAnswer], ttl: float
+    ) -> tuple[set[str], list[str]]:
+        """``(answered, stale)``: ids the store settles now, and those of them
+        to refresh behind the caller."""
+        answered: set[str] = set()
+        stale: list[str] = []
+        for oracle_id, answer in stored.items():
+            answered.add(oracle_id)
+            if not self._fresh(answer, ttl):
+                stale.append(oracle_id)
+        return answered, sorted(stale)
+
     # -- names -----------------------------------------------------------------
+
+    async def _fetch_names(
+        self, kind: str, values: Sequence[str], limit: asyncio.Semaphore
+    ) -> dict[str, str]:
+        """Ask Oracle. ``{id: name}`` for every id that ANSWERED, ``""`` for one
+        Oracle does not know; ids whose request failed are absent."""
+        resource, key, name_field = NAME_LOOKUPS[kind]
+
+        async def fetch(value: str) -> tuple[str, str]:
+            async with limit:
+                rows, _, _ = await self._client.get_collection(
+                    resource,
+                    {"q": eq(key, value, quote=False), "limit": 1, "fields": f"{key},{name_field}"},
+                    use_cache=self._use_cache,
+                )
+            return value, text(rows[0], name_field) if rows else ""
+
+        results = await asyncio.gather(*(fetch(v) for v in values), return_exceptions=True)
+        answered: dict[str, str] = {}
+        failures = 0
+        for result in results:
+            if isinstance(result, BaseException):
+                failures += 1
+                continue
+            answered[result[0]] = result[1]
+        if failures:
+            logger.warning("oracle %s lookup failed for %d of %d ids", kind, failures, len(values))
+        return answered
+
+    async def _ask_names(
+        self, kind: str, values: Sequence[str], limit: asyncio.Semaphore
+    ) -> dict[str, str]:
+        answered = await self._fetch_names(kind, values, limit)
+        await self._write(kind, {v: (n, None) for v, n in answered.items()})
+        memo, now = self._names[kind], time.monotonic()
+        for value, name in answered.items():
+            if name:
+                memo.put(value, name, now)
+        return answered
 
     async def names(
         self,
@@ -165,7 +311,6 @@ class OracleLookups:
         the answer rather than mapped to ``""``."""
         if kind not in NAME_LOOKUPS:
             raise ValueError(f"no Oracle name lookup for {kind!r}")
-        resource, key, name_field = NAME_LOOKUPS[kind]
         memo = self._names[kind]
         now = time.monotonic()
         wanted = {str(i) for i in ids if i}
@@ -177,28 +322,21 @@ class OracleLookups:
         missing = sorted(wanted - out.keys())
         if not missing:
             return out
-        limit = semaphore or self._semaphore()
-
-        async def fetch(value: str) -> tuple[str, str]:
-            async with limit:
-                rows, _, _ = await self._client.get_collection(
-                    resource,
-                    {"q": eq(key, value, quote=False), "limit": 1, "fields": f"{key},{name_field}"},
-                )
-            return value, text(rows[0], name_field) if rows else ""
-
-        results = await asyncio.gather(*(fetch(v) for v in missing), return_exceptions=True)
-        failures = 0
-        for result in results:
-            if isinstance(result, BaseException):
-                failures += 1
-                continue
-            value, name = result
+        stored = await self._read(kind, missing)
+        answered, stale = self._split(stored, self._name_ttl)
+        for value in answered:
+            name = stored[value].name
             if name:
                 out[value] = name
                 memo.put(value, name, now)
-        if failures:
-            logger.warning("oracle %s lookup failed for %d of %d ids", kind, failures, len(missing))
+        limit = semaphore or self._semaphore()
+        unknown = [v for v in missing if v not in answered]
+        if unknown:
+            for value, name in (await self._ask_names(kind, unknown, limit)).items():
+                if name:
+                    out[value] = name
+        if stale:
+            self._refresh_later(lambda: self._ask_names(kind, stale, self._semaphore()))
         return out
 
     async def names_many(self, wanted: Mapping[str, Sequence[str]]) -> dict[str, dict[str, str]]:
@@ -212,6 +350,49 @@ class OracleLookups:
         return dict(zip(kinds, found))
 
     # -- people ----------------------------------------------------------------
+
+    async def _ask_people(self, person_ids: Sequence[str]) -> dict[str, Person | None]:
+        """Ask Oracle. ``{pid: Person}`` for every id that answered, ``None``
+        for one the directory does not hold; failed requests are absent."""
+        semaphore = self._semaphore()
+
+        async def fetch(pid: str) -> tuple[str, Person | None]:
+            async with semaphore:
+                rows, _, _ = await self._client.get_collection(
+                    WORKERS,
+                    {
+                        "q": eq("PersonId", pid, quote=False),
+                        "limit": 1,
+                        "fields": "PersonId,DisplayName,WorkEmail,Username",
+                    },
+                    use_cache=self._use_cache,
+                )
+            if not rows:
+                return pid, None
+            return pid, Person(pid, text(rows[0], "DisplayName"), worker_address(rows[0]))
+
+        results = await asyncio.gather(*(fetch(p) for p in person_ids), return_exceptions=True)
+        answered: dict[str, Person | None] = {}
+        failures = 0
+        for result in results:
+            if isinstance(result, BaseException):
+                failures += 1
+                continue
+            answered[result[0]] = result[1]
+        if failures:
+            logger.warning("oracle worker lookup failed for %d of %d people", failures, len(person_ids))
+        await self._write(
+            DIRECTORY_KIND,
+            {
+                pid: (person.display_name, {"address": person.address}) if person else ("", None)
+                for pid, person in answered.items()
+            },
+        )
+        now = time.monotonic()
+        for pid, person in answered.items():
+            if person is not None:
+                self._people.put(pid, person, now)
+        return answered
 
     async def people(self, person_ids: Sequence[str]) -> dict[str, Person]:
         """``{person id: Person}`` for the people Oracle's directory knows.
@@ -229,34 +410,101 @@ class OracleLookups:
         missing = sorted(wanted - out.keys())
         if not missing:
             return out
+        stored = await self._read(DIRECTORY_KIND, missing)
+        answered, stale = self._split(stored, self._people_ttl)
+        for pid in answered:
+            held = stored[pid]
+            if held.name or (held.extra or {}).get("address"):
+                person = Person(pid, held.name, str((held.extra or {}).get("address") or ""))
+                out[pid] = person
+                self._people.put(pid, person, now)
+        unknown = [p for p in missing if p not in answered]
+        if unknown:
+            for pid, asked in (await self._ask_people(unknown)).items():
+                if asked is not None:
+                    out[pid] = asked
+        if stale:
+            self._refresh_later(lambda: self._ask_people(stale))
+        return out
+
+    # -- positions ---------------------------------------------------------------
+
+    async def _ask_positions(self, ids: Sequence[str]) -> dict[str, Position | None]:
         semaphore = self._semaphore()
 
-        async def fetch(pid: str) -> tuple[str, Person | None]:
+        async def fetch(pid: str) -> tuple[str, Position | None]:
             async with semaphore:
                 rows, _, _ = await self._client.get_collection(
-                    WORKERS,
+                    POSITIONS,
                     {
-                        "q": eq("PersonId", pid, quote=False),
+                        "q": eq("PositionId", pid, quote=False),
                         "limit": 1,
-                        "fields": "PersonId,DisplayName,WorkEmail,Username",
+                        "fields": "PositionId,Name,BudgetedPositionFlag",
                     },
+                    use_cache=self._use_cache,
                 )
             if not rows:
                 return pid, None
-            return pid, Person(pid, text(rows[0], "DisplayName"), worker_address(rows[0]))
+            return pid, Position(
+                pid, text(rows[0], "Name"), _budget_flag(rows[0].get("BudgetedPositionFlag"))
+            )
 
-        results = await asyncio.gather(*(fetch(p) for p in missing), return_exceptions=True)
+        results = await asyncio.gather(*(fetch(p) for p in ids), return_exceptions=True)
+        answered: dict[str, Position | None] = {}
         failures = 0
         for result in results:
             if isinstance(result, BaseException):
                 failures += 1
                 continue
-            pid, person = result
-            if person is not None:
-                out[pid] = person
-                self._people.put(pid, person, now)
+            answered[result[0]] = result[1]
         if failures:
-            logger.warning("oracle worker lookup failed for %d of %d people", failures, len(missing))
+            logger.warning("oracle position lookup failed for %d of %d ids", failures, len(ids))
+        flag_text = {True: "Y", False: "N", None: ""}
+        await self._write("position", {p: (pos.name if pos else "", None) for p, pos in answered.items()})
+        await self._write(
+            POSITION_BUDGET_KIND,
+            {p: (flag_text[pos.budgeted] if pos else "", None) for p, pos in answered.items()},
+        )
+        now = time.monotonic()
+        for pid, pos in answered.items():
+            if pos is not None:
+                self._positions.put(pid, pos, now)
+                if pos.name:
+                    self._names["position"].put(pid, pos.name, now)
+        return answered
+
+    async def positions(self, position_ids: Sequence[str]) -> dict[str, Position]:
+        """``{position id: Position}``: the name AND the budget flag, one request
+        per position for both (asking ``names("position")`` and then the flag
+        separately would read every position twice). Ids Oracle does not know,
+        and failed lookups, are absent. Kept in the store as ``position`` and
+        :data:`POSITION_BUDGET_KIND`."""
+        now = time.monotonic()
+        wanted = {str(p) for p in position_ids if p}
+        out: dict[str, Position] = {}
+        for pid in wanted:
+            hit = self._positions.get(pid, now)
+            if hit is not None:
+                out[pid] = hit
+        missing = sorted(wanted - out.keys())
+        if not missing:
+            return out
+        names = await self._read("position", missing)
+        flags = await self._read(POSITION_BUDGET_KIND, missing)
+        both = {p: names[p] for p in names if p in flags}
+        answered, stale = self._split(both, self._name_ttl)
+        for pid in answered:
+            if both[pid].name or flags[pid].name:
+                position = Position(pid, both[pid].name, _budget_flag(flags[pid].name))
+                out[pid] = position
+                self._positions.put(pid, position, now)
+        unknown = [p for p in missing if p not in answered]
+        if unknown:
+            for pid, pos in (await self._ask_positions(unknown)).items():
+                if pos is not None:
+                    out[pid] = pos
+        if stale:
+            self._refresh_later(lambda: self._ask_positions(stale))
         return out
 
     async def find_worker(self, address: str, *, expand: str | None = None) -> dict[str, Any] | None:

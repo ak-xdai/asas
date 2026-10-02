@@ -63,3 +63,17 @@ class OracleAlreadyExistsError(OracleUpstreamError):
     caller chooses the key (a requisition number, say) and retries a create,
     this answer says the first attempt landed. The caller reads the record back
     by that key. On a first attempt it means a genuine collision."""
+
+
+class OracleUnavailableError(OracleUpstreamError):
+    """The client's circuit breaker is open: this process saw Oracle fail
+    several times in a row and is not asking again until the cooldown ends.
+
+    Raised at once, before any request, so a caller learns of the outage in
+    microseconds rather than after a timeout. A subclass of the upstream error,
+    so a fail-soft caller already handles it; ``retry_after_seconds`` says when
+    the breaker will let one probe through. Transient by definition."""
+
+    def __init__(self, message: str, *, retry_after_seconds: int, method: str = "", path: str = "") -> None:
+        super().__init__(message, status=None, method=method, path=path)
+        self.retry_after_seconds = retry_after_seconds

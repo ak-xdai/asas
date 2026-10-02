@@ -32,4 +32,25 @@ import and sync) stayed behind.
 - Recruiting helpers that respect Oracle's own caps: `candidate_page` (200 per
   page, 10,000 offset ceiling), `candidate_attachments`, `enclosure_key`,
   `download_attachment`.
+- **Upstream health.** A per-client `Breaker` makes reads fail at once with
+  `OracleUnavailableError` after consecutive faults (transport, 5xx, 429),
+  then lets one probe decide; writes are counted, never refused.
+  `client.health.snapshot()` carries the breaker and per-resource call
+  statistics; `count_calls()` counts the Oracle requests one host request made.
+- **Gateway-only authentication.** Basic auth is sent only when a username is
+  set, so a gateway that authenticates to the integration layer itself takes
+  the API key alone; a `base_url` needs credentials, a key, or both.
+- **A bounded, warm connection pool** (`max_connections`) and retries for a
+  connection that could not be opened (`connect_retries`), on the client the
+  library owns.
+- **`use_cache=False`** on `get`, `get_collection` and `iter_collection`.
+- **`LookupStore`**, an optional persistent home for lookup answers shared by
+  every process: stale answers served and refreshed in the background,
+  negative answers kept, failures never stored, refreshes that skip the read
+  cache. `MemoryLookupStore` is the in-process implementation.
+- **`OracleLookups.positions()`**: a position's name and budget flag in one
+  request.
+- **`asas-oracle-check`** (`asas_oracle_hcm.check`): every recruiting read
+  called once, to verify a gateway registration. Never writes, never prints a
+  body.
 - Depends on `httpx` only.

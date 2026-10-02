@@ -44,8 +44,9 @@ await client.aclose()        # or: async with oracle.OracleFusionClient(...) as 
 ## Settings
 
 `OracleSettings(base_url, username, password, timeout_seconds=30,
-gateway_api_key="", gateway_api_key_header="x-api-key")`. It validates at
-construction, so a half-wired host fails at boot.
+gateway_api_key="", gateway_api_key_header="x-api-key", max_connections=20,
+connect_retries=2)`. It validates at construction, so a half-wired host fails
+at boot.
 
 An **empty `base_url` is allowed** and means "Oracle is off in this
 deployment": `client.configured` is `False` and the first call raises
@@ -53,11 +54,22 @@ deployment": `client.configured` is `False` and the first call raises
 without an instance.
 
 `gateway_api_key` is for a deployment that reaches Fusion through an API
-gateway: every request also carries the key in `gateway_api_key_header`. The
-Basic credentials still travel, so the key is an addition, never a replacement,
-and an unset key sends no header. `OracleSettings.from_env(prefix="ORACLE_HCM_")`
-reads `BASE_URL`, `USERNAME`, `PASSWORD` and the optional `TIMEOUT_SECONDS`,
-`GATEWAY_API_KEY`, `GATEWAY_API_KEY_HEADER`.
+gateway: every request also carries the key in `gateway_api_key_header`, and an
+unset key sends no header. **Basic auth travels only when a username is set**:
+direct to Fusion the service account is required, but a gateway that
+authenticates to the integration layer itself (an OAuth client behind it, as
+with AD Connect in front of Oracle Integration Cloud) takes the key ALONE, and
+an empty pair must send no `Authorization: Basic Og==`. So a `base_url` needs a
+username and password, a gateway key, or both.
+
+`max_connections` bounds the pool the client owns (the TLS handshake to a
+gateway is the dear part, so connections stay warm) and `connect_retries`
+retries a connection that could not be opened, which sent nothing and so is
+safe even for a POST. Neither applies to an `httpx.AsyncClient` you pass in.
+
+`OracleSettings.from_env(prefix="ORACLE_HCM_")` reads `BASE_URL`, `USERNAME`,
+`PASSWORD` and the optional `TIMEOUT_SECONDS`, `GATEWAY_API_KEY`,
+`GATEWAY_API_KEY_HEADER`, `MAX_CONNECTIONS`, `CONNECT_RETRIES`.
 
 ## The client
 
@@ -87,6 +99,49 @@ idempotent and safe for a caller to retry; a transition such as
 A host that needs a private CA, a proxy or a shared pool passes its own
 `httpx.AsyncClient` as `http=`; the library uses it as-is and does not close it.
 
+## Upstream health
+
+Every request goes through a **circuit breaker**, `Breaker(failures=5,
+cooldown_seconds=30)`, passed to the client as `breaker=`. After `failures`
+consecutive faults (a transport error, a 5xx or a 429; any other 4xx is an
+answer, not a fault) READS raise `OracleUnavailableError` at once, before any
+request, instead of each waiting out the timeout against a gateway that is down.
+When the cooldown ends ONE probe goes out: success closes the breaker, a fault
+opens it again. **Writes are counted but never refused**, because the caller's
+outbox owns their retry and cadence. `Breaker(failures=0)` turns it off. It is
+per client, so per process: the process that cannot reach the gateway is the
+one that stops asking.
+
+`client.health.snapshot()` is a JSON-ready view for a status page: the breaker
+state, consecutive faults, reads refused, and per method and resource the
+calls, faults, average and worst latency.
+
+`count_calls()` counts the Oracle requests made inside a block, which is how a
+host notices a request path that has started reaching Oracle (cache hits are
+not calls):
+
+```python
+with oracle.count_calls() as counted:
+    response = await call_next(request)
+log.info("request", path=request.url.path, oracle_calls=counted.calls)
+```
+
+## Checking a gateway registration
+
+A gateway registers each operation on its own, so "the gateway works" is
+eighteen facts. `asas-oracle-check` (or `asas_oracle_hcm.check.check(client)`)
+calls every recruiting read once, in the order a key becomes available, with
+your own settings, and prints the status, a one-line error, a row count and the
+time for each. It tells a missing registration (404 from the gateway) from a
+refused key (401/403), a transport the gateway was not registered for, and a
+fault behind it (5xx). It never prints a body, and the two writes are listed,
+never called.
+
+```
+ORACLE_HCM_BASE_URL=https://gateway.example/OIC/1.0 ORACLE_HCM_GATEWAY_API_KEY=... \
+  ORACLE_HCM_GATEWAY_API_KEY_HEADER=x-CentraSite-APIKey asas-oracle-check
+```
+
 ## The query language
 
 What a real pod does with `q`, and the helpers that keep you off the traps:
@@ -107,7 +162,7 @@ bare list on some resources and as `{"items": [...]}` on others.
 ## Lookups
 
 `OracleLookups(client, concurrency=12, name_ttl_seconds=21600,
-people_ttl_seconds=3600)`. Hold one per process.
+people_ttl_seconds=3600, store=None)`. Hold one per process.
 
 - `names(kind, ids)` for `grade`, `department`, `business_unit`,
   `organization`, `job`, `position`, `job_family`, `person`
@@ -119,6 +174,10 @@ people_ttl_seconds=3600)`. Hold one per process.
   is a 404 on at least one pod).
 - `people(person_ids)` returns `Person(person_id, display_name, address)`.
   `/publicWorkers` lists current workers only.
+- `positions(position_ids)` returns `Position(position_id, name, budgeted)`:
+  the name AND `BudgetedPositionFlag` in ONE request per position, instead of
+  reading each position twice. `budgeted` is `None` when Oracle left the flag
+  unset, which is not `False`.
 - `find_worker(address, expand=None)` and `worker_department(address)`: a
   worker by email, by `WorkEmail` then `Username`, each as given and
   lowercased, and the department on their primary assignment.
@@ -128,6 +187,28 @@ people_ttl_seconds=3600)`. Hold one per process.
 Lookups are fail-soft: a failed or unknown id is absent from the answer, and a
 failure costs a name, never the request. `departments_in_set` is the exception,
 because a caller syncing a catalogue must know it got the whole list.
+
+### Keeping answers across processes
+
+In memory, every new process and every replica asks Oracle again, one request
+per id. Pass `store=` a `LookupStore` (two async methods, `read(kind, ids)` and
+`write(kind, {id: (name, extra)})`, over a table keyed on `(kind, oracle_id)`)
+and the lookups get three rules a store does not have to implement:
+
+- **Stale-while-revalidate.** An answer past its freshness (the same two TTLs)
+  is served at once and refreshed in the background, so after the first sight
+  of an id no caller waits on Oracle for it again. `await lookups.drain()` waits
+  for refreshes in flight.
+- **Negative answers are kept.** "No such id" is stored as an empty name and
+  honoured while fresh; a lookup that FAILED is never stored.
+- **A refresh skips the client's read cache** (`use_cache=False`). Once the
+  store decides its answer is out of date, a cached copy of the same read is no
+  newer; answering from it would save the old answer again as fresh.
+
+The kinds written are the `NAME_LOOKUPS` kinds, `directory` (a person, with
+`{"address": ...}` as extra) and `position_budget` (`"Y"`, `"N"` or `""`). A
+failing store is treated as an empty one. `MemoryLookupStore` is the in-process
+implementation, for tests and single-process hosts.
 
 **Test pods scrub work email.** A non-production pod writes
 `sendmail-test-discard@oracle.com` over every `WorkEmail`; `worker_address()`
@@ -151,6 +232,10 @@ off. For a store every replica shares, implement the four async methods of the
 dicts. Keys are scoped to the instance URL, so a test pod and production can
 share one store.
 
+`get(..., use_cache=False)` (and on `get_collection` / `iter_collection`) goes
+to Oracle whatever the cache holds and stores nothing: use it from any layer
+above the client that has decided its own copy is out of date.
+
 ## Recruiting helpers
 
 Oracle's own limits, not any product's; they return raw rows.
@@ -173,7 +258,8 @@ OracleError
 ├── OracleNotConfiguredError   no base URL: Oracle is off here
 └── OracleUpstreamError        refused, unreachable, or not JSON (.status, .method, .path, .is_transient)
     ├── OracleNotFoundError        404: a real answer about a real record
-    └── OracleAlreadyExistsError   a create refused because a caller-minted key is taken
+    ├── OracleAlreadyExistsError   a create refused because a caller-minted key is taken
+    └── OracleUnavailableError     the breaker is open: refused at once (.retry_after_seconds)
 ```
 
 Oracle's response body is never put on an exception (it carries tenant detail

@@ -15,10 +15,18 @@ Worth knowing about the upstream:
 
 **No retries here.** Whether and when to retry is the caller's policy: an
 outbox row counts its own attempts, and a second retry budget inside the client
-would be invisible to it. A PATCH by id is idempotent (the same body twice
+would be invisible to it. The one exception is a connection that could not be
+OPENED (``OracleSettings.connect_retries``), which sent nothing and so cannot
+be a duplicate. A PATCH by id is idempotent (the same body twice
 leaves the record where once did) and so is safe for a caller to retry; a
 state TRANSITION endpoint such as ``POST .../action/move`` is not, because a
 repeat advances the record again.
+
+**A circuit breaker guards the reads** (:class:`asas_oracle_hcm.Breaker`): after
+consecutive faults they fail at once with :class:`OracleUnavailableError`
+instead of each waiting out the timeout. Writes are counted, never refused.
+:attr:`OracleFusionClient.health` carries the breaker and per-resource call
+statistics for a status page.
 """
 
 from __future__ import annotations
@@ -26,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from typing import Any, AsyncIterator, NamedTuple
 
 import httpx
@@ -35,9 +44,11 @@ from .errors import (
     OracleAlreadyExistsError,
     OracleNotConfiguredError,
     OracleNotFoundError,
+    OracleUnavailableError,
     OracleUpstreamError,
 )
 from .settings import OracleSettings
+from .upstream import Breaker, UpstreamHealth
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +67,10 @@ _DUPLICATE_MARKERS = ("already exists", "duplicate", "unique")
 def _reads_as_duplicate(text: str) -> bool:
     lowered = (text or "").lower()
     return any(marker in lowered for marker in _DUPLICATE_MARKERS)
+
+
+def _ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1000.0
 
 
 def _resource(path: str) -> str:
@@ -92,6 +107,7 @@ class OracleFusionClient:
         cache: Cache | None = None,
         cache_policy: CachePolicy | None = None,
         cache_namespace: str = "asas:oracle",
+        breaker: Breaker | None = None,
     ) -> None:
         self._settings = settings
         self._borrowed = http
@@ -102,12 +118,18 @@ class OracleFusionClient:
         # share one store without sharing answers.
         scope = hashlib.sha1(settings.base_url.encode()).hexdigest()[:10]
         self._ns = f"{cache_namespace}:{scope}"
+        self._health = UpstreamHealth(breaker if breaker is not None else Breaker())
 
     # -- lifecycle -------------------------------------------------------------
 
     @property
     def configured(self) -> bool:
         return self._settings.configured
+
+    @property
+    def health(self) -> UpstreamHealth:
+        """The breaker and the call statistics (``health.snapshot()``)."""
+        return self._health
 
     @property
     def base_url(self) -> str:
@@ -127,7 +149,16 @@ class OracleFusionClient:
         if self._borrowed is not None:
             return self._borrowed
         if self._owned is None:
-            self._owned = httpx.AsyncClient(timeout=self._settings.timeout_seconds)
+            s = self._settings
+            transport = httpx.AsyncHTTPTransport(
+                retries=s.connect_retries,
+                limits=httpx.Limits(
+                    max_connections=s.max_connections,
+                    max_keepalive_connections=s.max_connections,
+                    keepalive_expiry=30.0,
+                ),
+            )
+            self._owned = httpx.AsyncClient(timeout=s.timeout_seconds, transport=transport)
         return self._owned
 
     def _url(self, path: str) -> str:
@@ -144,6 +175,20 @@ class OracleFusionClient:
     ) -> httpx.Response:
         http = self._http()
         s = self._settings
+        health = self._health
+        breaker = health.breaker
+        # Reads are guarded; writes are counted but never refused, because the
+        # caller's outbox owns their retry and cadence.
+        if method == "GET" and not breaker.allow():
+            health.refused += 1
+            raise OracleUnavailableError(
+                "Oracle is unavailable; not asking again until the cooldown ends.",
+                retry_after_seconds=breaker.retry_after_seconds(),
+                method=method,
+                path=path,
+            )
+        resource = _resource(path) or "root"
+        started = time.perf_counter()
         try:
             response = await http.request(
                 method,
@@ -151,14 +196,21 @@ class OracleFusionClient:
                 params=params,
                 json=json_body,
                 headers={**self._headers(), **(headers or {})},
-                auth=(s.username, s.password),
+                auth=s.basic_auth,
                 timeout=s.timeout_seconds,
             )
         except httpx.HTTPError as exc:
+            health.record(method, resource, _ms(started), fault=True)
             logger.warning("oracle %s %s: transport failure: %s", method, path, exc)
             raise OracleUpstreamError(
                 "Oracle is unreachable.", method=method, path=path
             ) from exc
+        except BaseException:
+            # Cancelled mid-call: no verdict, but a probe must not stay claimed.
+            breaker.release_probe()
+            raise
+        code = response.status_code
+        health.record(method, resource, _ms(started), fault=code >= 500 or code == 429)
         if response.status_code >= 400:
             text = response.text[:500]
             logger.warning("oracle %s %s answered %s", method, path, response.status_code)
@@ -225,19 +277,27 @@ class OracleFusionClient:
 
     # -- verbs -----------------------------------------------------------------
 
-    async def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def get(
+        self, path: str, params: dict[str, Any] | None = None, *, use_cache: bool = True
+    ) -> dict[str, Any]:
         """GET one resource or collection and return its decoded body.
 
         ``onlyData=true`` is sent unless the caller passes ``onlyData`` itself.
         ``None`` values in ``params`` are dropped. Read-through cached per the
         :class:`CachePolicy`; a cache miss or a failing cache falls through to
-        Oracle unchanged."""
+        Oracle unchanged.
+
+        ``use_cache=False`` goes to Oracle whatever the cache holds and stores
+        nothing. Use it when a layer ABOVE the client (a persistent lookup
+        store, a mirror) has decided its own answer is out of date: a cached
+        copy of the same read is no newer, and answering from it would re-save
+        the old answer as fresh."""
         query: dict[str, Any] = {"onlyData": "true"}
         query.update({k: v for k, v in (params or {}).items() if v is not None})
         resource = _resource(path)
         ttl = self._policy.ttls.get(resource, 0)
         cache_key = ""
-        if ttl > 0 and self._settings.configured:
+        if use_cache and ttl > 0 and self._settings.configured:
             cache_key = await self._cache_key(resource, path, query)
             cached = await self._cache.get(cache_key)
             if isinstance(cached, dict) and isinstance(cached.get("body"), dict):
@@ -251,10 +311,11 @@ class OracleFusionClient:
         return body
 
     async def get_collection(
-        self, path: str, params: dict[str, Any] | None = None
+        self, path: str, params: dict[str, Any] | None = None, *, use_cache: bool = True
     ) -> CollectionPage:
-        """GET a collection as a :class:`CollectionPage`."""
-        body = await self.get(path, params)
+        """GET a collection as a :class:`CollectionPage` (``use_cache`` as in
+        :meth:`get`)."""
+        body = await self.get(path, params, use_cache=use_cache)
         items = body.get("items")
         rows = [r for r in items if isinstance(r, dict)] if isinstance(items, list) else []
         raw_total = body.get("totalResults")
@@ -272,6 +333,7 @@ class OracleFusionClient:
         *,
         page_size: int = MAX_PAGE_SIZE,
         max_pages: int | None = None,
+        use_cache: bool = True,
     ) -> AsyncIterator[dict[str, Any]]:
         """Every row of a collection, paging by offset until Oracle says there
         is no more (or a page comes back empty).
@@ -284,7 +346,7 @@ class OracleFusionClient:
         base = dict(params or {})
         while True:
             page = await self.get_collection(
-                path, {**base, "limit": page_size, "offset": offset}
+                path, {**base, "limit": page_size, "offset": offset}, use_cache=use_cache
             )
             for row in page.items:
                 yield row

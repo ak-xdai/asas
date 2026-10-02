@@ -20,6 +20,9 @@ dependencies = [
     "httpx>=0.27,<1",
 ]
 
+[project.scripts]
+asas-oracle-check = "asas_oracle_hcm.check:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",

@@ -17,8 +17,17 @@ four host-contract slots. Everything is an object the host constructs:
   cached per a :class:`CachePolicy` over a :class:`Cache`
   (:class:`MemoryCache` by default, :class:`NullCache` to turn it off).
 - :class:`OracleLookups`: id-to-name lookups (:data:`NAME_LOOKUPS`), people by
-  person id, a worker by email address and their department, and a reference
-  set's departments.
+  person id, positions with their budget flag, a worker by email address and
+  their department, and a reference set's departments. Optionally backed by a
+  :class:`LookupStore` shared across processes (stale answers served and
+  refreshed behind the caller, negative answers kept);
+  :class:`MemoryLookupStore` is the in-process one.
+- Upstream health: a :class:`Breaker` that makes reads fail fast with
+  :class:`OracleUnavailableError` during an outage, per-resource call
+  statistics (``client.health.snapshot()``), and :func:`count_calls` to count
+  the Oracle requests one host request made.
+- :mod:`asas_oracle_hcm.check` (``asas-oracle-check``): every recruiting read
+  called once, for verifying a gateway registration.
 - ``query``: the ``q`` grammar (:func:`eq`, :func:`like`, :func:`and_`,
   :func:`literal`) and row readers (:func:`text`, :func:`flag`,
   :func:`integer`, :func:`child_items`).
@@ -27,7 +36,8 @@ four host-contract slots. Everything is an object the host constructs:
   :func:`download_attachment`.
 - Errors: :class:`OracleError` > :class:`OracleConfigError`,
   :class:`OracleNotConfiguredError`, :class:`OracleUpstreamError` >
-  :class:`OracleNotFoundError`, :class:`OracleAlreadyExistsError`.
+  :class:`OracleNotFoundError`, :class:`OracleAlreadyExistsError`,
+  :class:`OracleUnavailableError`.
 """
 
 from __future__ import annotations
@@ -40,14 +50,18 @@ from .errors import (
     OracleError,
     OracleNotConfiguredError,
     OracleNotFoundError,
+    OracleUnavailableError,
     OracleUpstreamError,
 )
 from .lookups import (
     DEFAULT_CONCURRENCY,
+    DIRECTORY_KIND,
     NAME_LOOKUPS,
+    POSITION_BUDGET_KIND,
     SCRUBBED_WORK_EMAIL,
     OracleLookups,
     Person,
+    Position,
     WorkerDepartment,
     worker_address,
 )
@@ -62,19 +76,26 @@ from .recruiting import (
     enclosure_key,
 )
 from .settings import OracleSettings
+from .store import LookupStore, MemoryLookupStore, StoredAnswer
+from .upstream import Breaker, CallCount, UpstreamHealth, count_calls
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "Breaker",
     "CANDIDATE_MAX_PAGE_SIZE",
     "CANDIDATE_OFFSET_CEILING",
     "Cache",
     "CachePolicy",
+    "CallCount",
     "CandidatePage",
     "CollectionPage",
     "DEFAULT_CONCURRENCY",
+    "DIRECTORY_KIND",
+    "LookupStore",
     "MAX_PAGE_SIZE",
     "MemoryCache",
+    "MemoryLookupStore",
     "NAME_LOOKUPS",
     "NullCache",
     "OracleAlreadyExistsError",
@@ -85,14 +106,21 @@ __all__ = [
     "OracleNotConfiguredError",
     "OracleNotFoundError",
     "OracleSettings",
+    "OracleUnavailableError",
     "OracleUpstreamError",
+    "POSITION_BUDGET_KIND",
     "Person",
+    "Position",
     "SCRUBBED_WORK_EMAIL",
+    "StoredAnswer",
+    "UpstreamHealth",
     "WorkerDepartment",
+    "__version__",
     "and_",
     "candidate_attachments",
     "candidate_page",
     "child_items",
+    "count_calls",
     "download_attachment",
     "enclosure_key",
     "eq",
