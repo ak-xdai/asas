@@ -112,6 +112,12 @@ from .query import (
     text,
 )
 from .paging import DEFAULT_OFFSET_CEILING, CappedPage, capped_page
+from .attachments import (
+    attachments,
+    download_attachment,
+    download_enclosure,
+    enclosure_key,
+)
 from .accounts import (
     SCRUBBED_EMAIL,
     USER_ACCOUNTS,
@@ -206,6 +212,7 @@ __all__ = [
     "holds_any_role",
     "usernames_for",
     "transport_detail",
+    "download_attachment",
     "and_",
     "and_words",
     "REST_FRAMEWORK_V2",

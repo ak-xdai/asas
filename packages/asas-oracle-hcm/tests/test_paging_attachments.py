@@ -85,3 +85,51 @@ def test_download_enclosure_hits_the_records_enclosure(client, oracle):
     )
     content, _ = run(download_enclosure(client, "/documentRecords/9", "00AB12"))
     assert content == b"bytes"
+
+
+# ---- the verified download (carried over from the first host) ---------------
+
+
+def _attachment(key: str, **over):
+    row = {
+        "AttachedDocumentId": 1,
+        "UploadedFileName": "cv.pdf",
+        "UploadedFileContentType": "application/pdf",
+        "links": [
+            {
+                "name": "FileContents",
+                "href": f"https://pod/x/child/attachments/{key}/enclosure/FileContents",
+            }
+        ],
+    }
+    row.update(over)
+    return row
+
+
+def test_a_verified_download_answers_the_bytes_the_type_and_the_NAME(client, oracle):
+    from asas_oracle_hcm import download_attachment
+
+    oracle.route("/workers/7/child/attachments", collection(_attachment("abc123")))
+    oracle.route(
+        "/workers/7/child/attachments/abc123/enclosure/FileContents", (200, b"%PDF-1.7")
+    )
+    content, content_type, name = run(download_attachment(client, "/workers/7", "abc123"))
+    assert content == b"%PDF-1.7"
+    # The ROW's type, not what Fusion served: it serves every enclosure as
+    # octet-stream whatever it is.
+    assert content_type == "application/pdf"
+    # The name comes from Fusion, so no caller string reaches a header.
+    assert name == "cv.pdf"
+
+
+def test_A_KEY_FROM_ANOTHER_RECORD_IS_A_404_AND_NEVER_A_DOWNLOAD(client, oracle):
+    """The whole reason this exists beside `download_enclosure`: an enclosure
+    key is a bare string in a URL, so without the check a key lifted from one
+    record downloads against any other."""
+    from asas_oracle_hcm import OracleNotFoundError, download_attachment
+
+    oracle.route("/workers/7/child/attachments", collection(_attachment("mine")))
+    with pytest.raises(OracleNotFoundError):
+        run(download_attachment(client, "/workers/7", "somebody-elses-key"))
+    # And nothing was fetched.
+    assert all("enclosure" not in c.path for c in oracle.calls)

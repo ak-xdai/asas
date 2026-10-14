@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from .client import OracleFusionClient
+from .errors import OracleNotFoundError
 from .query import eq
 
 
@@ -87,3 +88,35 @@ async def download_enclosure(
     return await client.get_bytes(
         f"{_record(record_path)}/child/attachments/{key}/enclosure/FileContents"
     )
+
+
+async def download_attachment(
+    client: OracleFusionClient, record_path: str, key: str
+) -> tuple[bytes, str, str]:
+    """An attachment's bytes, content type and FILENAME, with the key checked
+    against the record first.
+
+    THE CHECK IS THE POINT, and it is why this exists beside
+    :func:`download_enclosure`. An enclosure key is a bare string in a URL,
+    so without it a key lifted from one record downloads against ANY other:
+    the path says whose record it is and Fusion does not mind that the two
+    disagree. Leaving that to each caller (as the function below does, in a
+    docstring) is how one of them forgets.
+
+    The listing it costs is one extra call, and it buys two things: a key
+    that does not belong to this record is a :class:`OracleNotFoundError`
+    rather than a download, and the FILENAME comes from Fusion rather than
+    from the caller, so no caller-supplied string reaches a response header.
+
+    The content type is the row's own ``UploadedFileContentType`` where it
+    has one, because Fusion serves every enclosure as
+    ``application/octet-stream`` whatever it is.
+    """
+    rows = await attachments(client, record_path)
+    match = next((r for r in rows if key and enclosure_key(r) == key), None)
+    if match is None:
+        raise OracleNotFoundError("No such attachment on this record.")
+    content, served_type = await download_enclosure(client, record_path, key)
+    declared = str(match.get("UploadedFileContentType") or "").strip()
+    name = str(match.get("UploadedFileName") or match.get("FileName") or "").strip()
+    return content, (declared or served_type), name
