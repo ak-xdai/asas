@@ -38,23 +38,6 @@ class BootSnippet:
 
 
 SNIPPETS: dict[str, BootSnippet] = {
-    "tenancy": BootSnippet(
-        imports=("import asas_tenancy",),
-        setup=(
-            "# RLS is enabled per table inside each package's migration;",
-            "# bind the tenant per request/job with asas_tenancy.set_tenant_guc(conn, org_id)",
-            "# or wrap background engines with asas_tenancy.tenant_engine(dsn, org_id).",
-        ),
-    ),
-    "audit": BootSnippet(
-        imports=("import asas_audit",),
-        setup=(
-            "app.include_router(asas_audit.build_router(get_session, tenant=current_tenant))",
-            "# record inside the business transaction:",
-            "# asas_audit.append(session, org_id=..., actor=..., action=..., resource_type=..., resource_id=...)",
-        ),
-        boot=("asas_audit.migrate(engine)",),
-    ),
     "lookups": BootSnippet(
         imports=("import asas_lookups",),
         setup=(
@@ -189,6 +172,55 @@ SNIPPETS: dict[str, BootSnippet] = {
         boot=(
             "asas_search.migrate(engine)  "
             "# Postgres-only DDL; SQLite records the version and creates nothing",
+        ),
+    ),
+    "tenancy": BootSnippet(
+        imports=("import asas_tenancy", "from sqlalchemy import event"),
+        setup=(
+            "# Pin the request's tenant on every transaction, so Postgres row-level\n"
+            "# security scopes each query. Bind it once per request from a VERIFIED\n"
+            "# credential: asas_tenancy.bind_tenant(<tenant id from the token>).",
+            "@event.listens_for(Session, \"after_begin\")\n"
+            "def _pin_tenant(session, transaction, connection):\n"
+            "    tenant = asas_tenancy.maybe_tenant_id()\n"
+            "    if tenant is not None:\n"
+            "        asas_tenancy.set_tenant_guc(connection, tenant)",
+            "# Protect each tenant table in your own migrations: "
+            "asas_tenancy.enable_rls(\"<table>\")  # TODO",
+        ),
+    ),
+    "audit": BootSnippet(
+        imports=("import asas_audit",),
+        setup=(
+            "def current_tenant() -> str:\n"
+            "    ...  # TODO: the verified tenant id of this request (a token claim)",
+            "app.include_router(asas_audit.build_router(get_session, tenant=current_tenant))",
+            "# Record a business action IN the unit of work that makes the change, so the\n"
+            "# audit row commits or rolls back with it: asas_audit.append(session, ...).",
+        ),
+        boot=("asas_audit.migrate(engine)",),
+    ),
+    "oracle": BootSnippet(
+        imports=("import functools", "import asas_oracle"),
+        setup=(
+            "@functools.cache  # ONE client per process: it holds the connection pool and the cache\n"
+            "def oracle_client() -> asas_oracle.OracleFusionClient:\n"
+            "    # An empty base URL means Oracle is off here: the client reports\n"
+            "    # configured == False instead of failing the boot.\n"
+            "    # Close at shutdown: await oracle_client().aclose() in your lifespan hook.\n"
+            "    return asas_oracle.OracleFusionClient(asas_oracle.OracleSettings(\n"
+            "        base_url=settings.oracle_base_url,\n"
+            "        username=settings.oracle_username,\n"
+            "        password=settings.oracle_password,\n"
+            "    ))",
+            "# lookups = asas_oracle.OracleLookups(oracle_client())  # one per process\n"
+            "# await lookups.names(\"grade\", grade_ids)  "
+            "# TODO: the integration user needs read access to the resources you call",
+        ),
+        settings_fields=(
+            ("oracle_base_url", "str", '""'),
+            ("oracle_username", "str", '""'),
+            ("oracle_password", "str", '""'),
         ),
     ),
     "mcp": BootSnippet(

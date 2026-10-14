@@ -27,6 +27,7 @@ migrations = [
     "alembic>=1.13",
 ]
 dev = [
+    "sqlmodel>=0.0.21,<0.0.45",
     "pytest>=8",
     "alembic>=1.13",
     "psycopg2-binary>=2.9",

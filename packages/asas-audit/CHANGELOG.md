@@ -10,6 +10,20 @@ Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASI
 First release. Extracted from a host application's working implementation, so the
 shapes below survived production rather than being a first guess at them.
 
+- **Hashing is engine-stable.** `append()` normalises `occurred_at` to UTC and
+  the payload to its canonical form before hashing, and stores exactly what it
+  hashed. A non-UTC input, a datetime value or a non-string dict key no longer
+  verifies as tampering, and a payload that cannot be serialised fails inside
+  `append()` rather than at the host's commit. The model's `occurred_at` column
+  is `timestamptz`, matching the migration.
+- **Chains cannot fork.** On SQLite the append path holds a process-wide mutex
+  from the tail read through the flush, because the writer lock does not cover
+  the read. A `UNIQUE (org_id, hash_prev)` index backstops both engines. The
+  standalone `org_id` index is gone; every composite index already leads with it.
+- **`verify()` streams** the history instead of loading it into memory.
+- **Router.** `resource_id` without `resource_type` answers 400 instead of 500,
+  and `tenant=` defaults to `asas_tenancy.current_tenant_id`, which raises when
+  no tenant is bound.
 - **`append(session, ...)`** records one business action on the caller's own
   session and does not commit, so the entry and the change it describes share one
   transaction and one fate. Two appends in one unit of work chain to each other

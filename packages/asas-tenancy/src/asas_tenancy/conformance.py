@@ -220,7 +220,7 @@ def visible_keys(engine: Engine, table: str, tenant_id: Any, *, key: str = "id",
     with engine.begin() as conn:
         set_tenant_guc(conn, tenant_id, guc=guc)
         rows = conn.execute(
-            text(f"SELECT {_identifier(key)} FROM {_identifier(table)}")
+            text(f"SELECT {_identifier(key, 'column')} FROM {_identifier(table, 'table')}")
         ).scalars().all()
     return set(rows)
 
@@ -261,7 +261,7 @@ def assert_unpinned_sees_nothing(engine: Engine, table: str) -> None:
     """
     require_enforced(engine)
     with engine.begin() as conn:
-        count = conn.execute(text(f"SELECT count(*) FROM {_identifier(table)}")).scalar()
+        count = conn.execute(text(f"SELECT count(*) FROM {_identifier(table, 'table')}")).scalar()
     if count:
         raise AssertionError(
             f"{table!r} returned {count} row(s) with no tenant pinned. Isolation "

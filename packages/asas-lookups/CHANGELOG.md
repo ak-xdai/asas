@@ -5,6 +5,14 @@ Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).
 
+## 0.13.3 — 2026-10-02
+
+- **Requires `sqlmodel<0.0.45`.** From 0.0.45, SQLModel's `DateTime` refuses a
+  datetime without a timezone, and this package stores naive UTC, so every
+  write of a timestamp failed on a fresh install. Nothing changes for a host
+  already on 0.0.44 or earlier. Moving the columns to timezone-aware values,
+  which lifts the cap, is a separate change.
+
 ## 0.13.2 — 2026-08-28
 
 - **The list ETag now varies with the query shape** (PR #11, re-landed). `GET

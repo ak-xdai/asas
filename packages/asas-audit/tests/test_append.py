@@ -117,6 +117,7 @@ def test_occurred_at_can_predate_the_write(session):
         resource_type="thing", resource_id="1", occurred_at=when,
     )
     session.commit()
+    asas_tenancy.set_tenant_guc(session, ORG_A)  # the pin is transaction-local
 
     # Read the value back FRESH — asserting on `row` under expire_on_commit=
     # False compares append()'s input with itself and would pass over any
@@ -141,6 +142,7 @@ def test_a_non_utc_occurred_at_round_trips_and_verifies(session):
         resource_type="thing", resource_id="tz", occurred_at=local,
     )
     session.commit()
+    asas_tenancy.set_tenant_guc(session, ORG_A)  # the pin is transaction-local
     report = asas_audit.verify(session, ORG_A)
     assert report.is_intact and report.events_checked == 1
 
@@ -156,6 +158,7 @@ def test_payload_is_stored_exactly_as_hashed(session):
         payload={2: "int-key", "when": when},   # int key + datetime value
     )
     session.commit()
+    asas_tenancy.set_tenant_guc(session, ORG_A)  # the pin is transaction-local
     report = asas_audit.verify(session, ORG_A)
     assert report.is_intact and report.events_checked == 1
 
