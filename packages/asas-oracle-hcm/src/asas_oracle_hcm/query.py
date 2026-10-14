@@ -3,7 +3,10 @@ the small readers every row needs.
 
 The traps, verified against a live Fusion HCM pod:
 
-- **AND is ``;``.** The literal word ``AND`` returns an empty body.
+- **AND is ``;`` on the recruiting resources.** The literal word ``AND``
+  returns an empty body there. **IT IS PER RESOURCE, not universal**:
+  ``/positions`` refuses ``;`` with a 400 and wants the word ``AND``
+  (:func:`and_words`), measured on a live pod.
 - **There is no working OR.** ``OR``, ``IN (...)`` and a comma-separated value
   list all silently match NOTHING: no error, just an empty collection. So a
   clause list is AND-only, a facet carries at most one value, and "several ids"
@@ -81,9 +84,35 @@ def like(field: str, term: object, *, strip_quotes: bool = False) -> str:
 
 def and_(*clauses: str | None) -> str | None:
     """Join clauses with Oracle's AND (``;``), skipping empty ones. ``None``
-    when nothing is being filtered, so it can be passed straight as ``q``."""
+    when nothing is being filtered, so it can be passed straight as ``q``.
+
+    THIS IS THE RECRUITING GRAMMAR, which is not universal: see
+    :func:`and_words` for the resources that invert it."""
     live = [c for c in clauses if c]
     return ";".join(live) if live else None
+
+
+def and_words(*clauses: str | None) -> str | None:
+    """Join clauses with the literal word ``AND``, for the resources that
+    refuse ``;``.
+
+    THE GRAMMAR IS PER RESOURCE, and the two forms are mutually exclusive.
+    Measured on a live Fusion pod (13 Oct 2026), the same two-clause filter on
+    ``/positions``:
+
+    - ``ActiveStatus='A';HiringStatus='APPROVED'`` answers **HTTP 400**.
+    - ``ActiveStatus = 'A' AND HiringStatus = 'APPROVED'`` answers **200** with
+      33,391 rows.
+
+    On ``recruitingJobRequisitions`` it is the exact inverse, which is what
+    :func:`and_` documents. A single clause works either way, which is why
+    this went unnoticed: the package's own position lookups ask by one id and
+    never meet it. Reach for this the moment a ``/positions`` filter has a
+    SECOND clause.
+
+    ``AND`` is spelled with spaces around it, as the working form above is."""
+    live = [c for c in clauses if c]
+    return " AND ".join(live) if live else None
 
 
 # --- row readers ---------------------------------------------------------------

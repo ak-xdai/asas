@@ -38,6 +38,7 @@ four host-contract slots. Everything is an object the host constructs:
   depends on called once, from a manifest of :class:`Probe` s, for verifying a
   gateway registration (the HCM reference reads by default).
 - ``query``: the ``q`` grammar (:func:`eq`, :func:`like`, :func:`and_`,
+  :func:`and_words` for the resources that refuse ``;``,
   :func:`literal`) and row readers (:func:`text`, :func:`flag`,
   :func:`integer`, :func:`child_items`).
 - Fusion's paging limits and attachments, on any resource:
@@ -96,7 +97,17 @@ from .lookups import (
     WorkerDepartment,
     worker_address,
 )
-from .query import and_, child_items, eq, flag, integer, like, literal, text
+from .query import (
+    and_,
+    and_words,
+    child_items,
+    eq,
+    flag,
+    integer,
+    like,
+    literal,
+    text,
+)
 from .paging import DEFAULT_OFFSET_CEILING, CappedPage, capped_page
 from .settings import OracleSettings
 from .store import LookupStore, MemoryLookupStore, StoredAnswer
@@ -110,6 +121,15 @@ from .upstream import (
     count_calls,
     is_outage,
 )
+
+#: The request header some resources need before they will answer a query at
+#: all. WITHOUT IT FUSION ANSWERS 200 AND AN EMPTY COLLECTION rather than an
+#: error, so a missing header reads as "there is nothing there": measured on a
+#: live pod, the same two-clause filter on ``/positions`` returns 33,391 rows
+#: with it and ZERO without. Pass it as ``headers`` to
+#: :meth:`OracleHcmClient.get`; it joins the cache key, so a v1 body is never
+#: served to a v2 reader.
+REST_FRAMEWORK_V2: dict[str, str] = {"REST-Framework-Version": "2"}
 
 __version__ = "0.1.0"
 
@@ -164,6 +184,8 @@ __all__ = [
     "UpstreamHealth",
     "WorkerDepartment",
     "and_",
+    "and_words",
+    "REST_FRAMEWORK_V2",
     "attachments",
     "capped_page",
     "check",

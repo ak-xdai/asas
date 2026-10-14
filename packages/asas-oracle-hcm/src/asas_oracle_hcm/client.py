@@ -327,10 +327,26 @@ class OracleFusionClient:
     def _version_key(self, resource: str) -> str:
         return f"{self._ns}:ver:{resource}"
 
-    async def _cache_key(self, resource: str, path: str, query: dict[str, Any]) -> str:
+    async def _cache_key(
+        self,
+        resource: str,
+        path: str,
+        query: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> str:
         version = await self._cache.get_int(self._version_key(resource))
+        # THE HEADERS ARE PART OF THE KEY, because they can change the ANSWER
+        # and not just its transport: `REST-Framework-Version: 2` is the whole
+        # reason `get` takes them, and a v1 body cached under a v2 reader's
+        # key (or the reverse) is a wrong answer served with no error.
         digest = hashlib.sha1(
-            json.dumps([path, sorted((k, str(v)) for k, v in query.items())]).encode()
+            json.dumps(
+                [
+                    path,
+                    sorted((k, str(v)) for k, v in query.items()),
+                    sorted((k, str(v)) for k, v in (headers or {}).items()),
+                ]
+            ).encode()
         ).hexdigest()
         return f"{self._ns}:{resource}:v{version}:{digest}"
 
@@ -343,7 +359,12 @@ class OracleFusionClient:
     # -- verbs -----------------------------------------------------------------
 
     async def get(
-        self, path: str, params: dict[str, Any] | None = None, *, use_cache: bool = True
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        use_cache: bool = True,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """GET one resource or collection and return its decoded body.
 
@@ -356,18 +377,26 @@ class OracleFusionClient:
         nothing. Use it when a layer ABOVE the client (a persistent lookup
         store, a mirror) has decided its own answer is out of date: a cached
         copy of the same read is no newer, and answering from it would re-save
-        the old answer as fresh."""
+        the old answer as fresh.
+
+        ``headers`` are extra request headers for this ONE read, and they join
+        the cache key. They exist for ``REST-Framework-Version: 2``, which some
+        resources need to answer a query at all: without it Fusion answers
+        **200 with an empty collection** rather than an error, so a missing
+        header reads as "there is nothing there". Measured on a live pod: the
+        same two-clause filter on ``/positions`` returns 33,391 rows under
+        version 2 and ZERO under the default version 1."""
         query: dict[str, Any] = {"onlyData": "true"}
         query.update({k: v for k, v in (params or {}).items() if v is not None})
         resource = _resource(path)
         ttl = self._policy.ttls.get(resource, 0)
         cache_key = ""
         if use_cache and ttl > 0 and self._settings.configured:
-            cache_key = await self._cache_key(resource, path, query)
+            cache_key = await self._cache_key(resource, path, query, headers)
             cached = await self._cache.get(cache_key)
             if isinstance(cached, dict) and isinstance(cached.get("body"), dict):
                 return cached["body"]
-        response = await self.request("GET", path, params=query)
+        response = await self.request("GET", path, params=query, headers=headers)
         body = self._json(response, "GET", path)
         if cache_key:
             if body.get("items") == []:
@@ -376,11 +405,16 @@ class OracleFusionClient:
         return body
 
     async def get_collection(
-        self, path: str, params: dict[str, Any] | None = None, *, use_cache: bool = True
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        use_cache: bool = True,
+        headers: dict[str, str] | None = None,
     ) -> CollectionPage:
-        """GET a collection as a :class:`CollectionPage` (``use_cache`` as in
-        :meth:`get`)."""
-        body = await self.get(path, params, use_cache=use_cache)
+        """GET a collection as a :class:`CollectionPage` (``use_cache`` and
+        ``headers`` as in :meth:`get`)."""
+        body = await self.get(path, params, use_cache=use_cache, headers=headers)
         items = body.get("items")
         rows = [r for r in items if isinstance(r, dict)] if isinstance(items, list) else []
         raw_total = body.get("totalResults")
