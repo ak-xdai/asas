@@ -1,0 +1,575 @@
+"""The HTTP layer: one async client per Oracle Fusion instance.
+
+Worth knowing about the upstream:
+
+- ``onlyData=true`` strips the HATEOAS ``links`` block, which triples a
+  payload. Every read sets it; a caller that needs the links (an attachment's
+  enclosure key lives only there) passes ``onlyData="false"``.
+- A field list NARROWS the response. Ask for no projection and a record comes
+  back with the NAMES Fusion denormalises beside its ids (a ``PhaseName``
+  beside a ``PhaseId``); ask for ``fields=...PhaseId`` and the names are
+  dropped, leaving bare ids that no lookup resource resolves.
+- A PATCH wants ``application/vnd.oracle.adf.resourceitem+json`` and refuses
+  plain JSON; a POST wants plain JSON and refuses the ADF type.
+- A duplicate key on a create comes back as a 400 with prose, not a 409, so the
+  status alone cannot tell it apart (see :class:`OracleAlreadyExistsError`).
+
+**No retries here.** Whether and when to retry is the caller's policy: an
+outbox row counts its own attempts, and a second retry budget inside the client
+would be invisible to it. The one exception is a connection that could not be
+OPENED (``OracleSettings.connect_retries``), which sent nothing and so cannot
+be a duplicate. A PATCH by id is idempotent (the same body twice
+leaves the record where once did) and so is safe for a caller to retry; a
+state TRANSITION endpoint such as ``POST .../action/move`` is not, because a
+repeat advances the record again.
+
+**Circuit breakers guard the reads**, one per resource plus one for the host
+(:class:`asas_oracle.BreakerPolicy`): after consecutive outages they fail
+at once with :class:`OracleUnavailableError` instead of each waiting out the
+timeout. Writes are counted, never refused.
+:attr:`OracleFusionClient.health` carries the breaker and per-resource call
+statistics for a status page.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import time
+from collections.abc import Callable
+from email.utils import parsedate_to_datetime
+from typing import Any, AsyncIterator, NamedTuple
+
+import httpx
+
+from .auth import Auth
+from .cache import Cache, CachePolicy, MemoryCache
+from .errors import (
+    OracleAlreadyExistsError,
+    OracleGatewayError,
+    OracleLockedError,
+    OracleAuthError,
+    OracleNotConfiguredError,
+    OracleNotFoundError,
+    OracleUnavailableError,
+    OracleUpstreamError,
+    transport_detail,
+)
+from .settings import OracleSettings
+from .upstream import BreakerPolicy, RequestEvent, UpstreamHealth
+
+logger = logging.getLogger(__name__)
+
+#: Oracle's own page cap on most resources (see :mod:`asas_oracle.paging`
+#: for the cap and the offset ceiling).
+MAX_PAGE_SIZE = 200
+
+_ADF_ITEM = "application/vnd.oracle.adf.resourceitem+json"
+
+#: The words Oracle's duplicate-key refusal is known to use. Matched only to
+#: choose an error CLASS, never shown, and kept loose: a refusal we do not
+#: recognise falls through to the generic upstream error, the fail-closed side.
+_DUPLICATE_MARKERS = ("already exists", "duplicate", "unique")
+
+
+#: Fusion's row-lock refusal: "Failed to lock the record in table ... another
+#: user holds the lock." A 400, and TRANSIENT, so it gets its own class and a
+#: caller with an outbox can back off instead of parking the row.
+_LOCK_MARKERS = ("another user holds the lock", "failed to lock the record")
+
+#: What an API GATEWAY says when it refuses before Oracle is reached at all:
+#: an operation it does not carry, a transport it was not registered for, a
+#: path parameter it cannot map. Measured on a webMethods/CentraSite gateway.
+_GATEWAY_MARKERS = (
+    "transport protocol not supported",
+    "casdk-",
+    "api gateway",
+    "not registered",
+    "centrasite",
+    "no matching resource",
+    "resource not found",
+)
+
+
+def _matches(text: str, markers: tuple[str, ...]) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in markers)
+
+
+def _reads_as_duplicate(text: str) -> bool:
+    return _matches(text, _DUPLICATE_MARKERS)
+
+
+def _ms(started: float) -> float:
+    return (time.perf_counter() - started) * 1000.0
+
+
+def _retry_after(response: httpx.Response) -> int | None:
+    """``Retry-After`` as seconds (it may be a number or an HTTP date)."""
+    raw = (response.headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    from datetime import datetime, timezone
+
+    return max(0, int((when - datetime.now(timezone.utc)).total_seconds()))
+
+
+def _route_headers(route: str, method: str, body: object) -> dict[str, str]:
+    """The headers the ROUTE itself needs, before auth and before the
+    caller's own.
+
+    AN EMPTY ``Content-Type`` ON EVERY GATEWAY READ. Measured on a
+    webMethods gateway in front of Oracle Integration Cloud: a GET with no
+    Content-Type at all, and a GET with ``application/json``, are both
+    answered **415**; an EMPTY one is answered 200. httpx sends no
+    Content-Type on a bodyless request, so the header has to be set
+    explicitly to the empty string, which httpx then sends as present and
+    blank.
+
+    A WRITE STATES ITS OWN MEDIA TYPE and must never inherit the empty one:
+    a body sent with a blank Content-Type is refused. The caller's own
+    headers are merged after these, so a write that names its type wins; this
+    is the belt for one that forgets. The direct route gets neither.
+    """
+    if route != "gateway":
+        return {}
+    if method.upper() in ("GET", "HEAD", "DELETE") and body is None:
+        return {"Content-Type": ""}
+    return {"Content-Type": "application/json"}
+
+
+def _resource(path: str) -> str:
+    return path.strip("/").split("/", 1)[0].split("?", 1)[0]
+
+
+class CollectionPage(NamedTuple):
+    """One page of a collection. Unpacks as ``items, has_more, total``.
+
+    ``total`` appears only when the caller asks with ``totalResults=true``, and
+    some resources answer ``-1`` even then: that is Oracle declining to count,
+    NOT an empty collection, so it reads as ``None``. Oracle's own ``count`` is
+    the size of this page and is never the total."""
+
+    items: list[dict[str, Any]]
+    has_more: bool
+    total: int | None
+
+
+class OracleFusionClient:
+    """JSON client for one Oracle Fusion instance.
+
+    Holds one ``httpx.AsyncClient`` so the TLS handshake is paid once. A host
+    that needs a private CA, a proxy or a shared pool passes its own as
+    ``http=``; the library uses it as-is and does not close it. Close the
+    client at shutdown with ``await client.aclose()`` or ``async with``.
+    """
+
+    def __init__(
+        self,
+        settings: OracleSettings,
+        *,
+        http: httpx.AsyncClient | None = None,
+        cache: Cache | None = None,
+        cache_policy: CachePolicy | None = None,
+        cache_namespace: str = "asas:oracle",
+        breaker: BreakerPolicy | None = None,
+        auth: Auth | None = None,
+        on_request: Callable[[RequestEvent], Any] | None = None,
+    ) -> None:
+        """``auth`` replaces the credential the settings describe
+        (:meth:`OracleSettings.auth`); ``on_request`` is called once per
+        request with a :class:`RequestEvent`, for a host's own metrics or
+        tracing (an exception in it is logged and ignored)."""
+        self._settings = settings
+        self._auth: Auth = auth if auth is not None else settings.auth()
+        self._on_request = on_request
+        self._borrowed = http
+        self._owned: httpx.AsyncClient | None = None
+        self._cache: Cache = cache if cache is not None else MemoryCache()
+        self._policy = cache_policy or CachePolicy()
+        # Keys are scoped to the instance, so a test pod and production can
+        # share one store without sharing answers. The host may NAME the scope
+        # (`settings.cache_scope`) instead of taking the address's digest,
+        # which is what a host wants when it keeps keys of its own beside
+        # these and needs them in the same segment.
+        self._scope = settings.cache_scope or hashlib.sha1(
+            settings.base_url.encode()
+        ).hexdigest()[:10]
+        self._ns = f"{cache_namespace}:{self._scope}"
+        self._health = UpstreamHealth(breaker)
+
+    # -- lifecycle -------------------------------------------------------------
+
+    @property
+    def configured(self) -> bool:
+        return self._settings.configured
+
+    @property
+    def health(self) -> UpstreamHealth:
+        """The breaker and the call statistics (``health.snapshot()``)."""
+        return self._health
+
+    @property
+    def cache_scope(self) -> str:
+        """This instance's segment in every cache key.
+
+        Exposed because a host usually keeps keys of its own next to these (a
+        permission answer, a cursor) and they have to be scoped the same way,
+        or two deployments sharing one Redis share those too.
+        """
+        return self._scope
+
+    @property
+    def base_url(self) -> str:
+        """Safe to show: credentials travel in the Authorization header."""
+        return self._settings.base_url
+
+    def _emit(self, event: RequestEvent) -> None:
+        if self._on_request is None:
+            return
+        try:
+            self._on_request(event)
+        except Exception:  # noqa: BLE001 - a metrics hook must never fail a request
+            logger.warning("oracle on_request hook raised", exc_info=True)
+
+    def _http(self) -> httpx.AsyncClient:
+        if not self._settings.configured:
+            raise OracleNotConfiguredError("Oracle HCM is not configured for this deployment.")
+        if self._borrowed is not None:
+            return self._borrowed
+        if self._owned is None:
+            s = self._settings
+            transport = httpx.AsyncHTTPTransport(
+                retries=s.connect_retries,
+                limits=httpx.Limits(
+                    max_connections=s.max_connections,
+                    max_keepalive_connections=s.max_connections,
+                    keepalive_expiry=30.0,
+                ),
+            )
+            self._owned = httpx.AsyncClient(timeout=s.timeout_seconds, transport=transport)
+        return self._owned
+
+    def _url(self, path: str) -> str:
+        return f"{self._settings.base_url}/{path.lstrip('/')}"
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+        raise_for_status: bool = True,
+        guard: bool | None = None,
+    ) -> httpx.Response:
+        """Send one request with the client's credentials, breakers, statistics
+        and hook, and return Fusion's response.
+
+        The building block the verbs below use, public for what they do not
+        cover (a resource with its own media type, a diagnostic). ``path`` is
+        relative to the REST root and ``params`` are sent as given.
+        ``raise_for_status=False`` returns a 4xx/5xx response instead of
+        raising (the body is then the caller's to keep out of logs).
+        ``guard`` decides whether an open breaker refuses the request: by
+        default reads are guarded and writes are not.
+
+        A credential that can be renewed (an OAuth token) is renewed and the
+        request sent ONCE more after a 401: the upstream refused it before
+        doing anything, so even a POST is safe to resend."""
+        http = self._http()
+        s = self._settings
+        health = self._health
+        resource = _resource(path) or "root"
+        guarded = (method == "GET") if guard is None else guard
+        if guarded:
+            refusing = health.allow(resource)
+            if refusing is not None:
+                health.refused += 1
+                self._emit(RequestEvent(method, resource, path, None, 0.0, False, refused=True))
+                raise OracleUnavailableError(
+                    "Oracle is unavailable; not asking again until the cooldown ends.",
+                    retry_after_seconds=refusing.retry_after_seconds(),
+                    method=method,
+                    path=path,
+                )
+        response: httpx.Response | None = None
+        for attempt in (1, 2):
+            started = time.perf_counter()
+            try:
+                sent_headers = {
+                    "Accept": "application/json",
+                    **_route_headers(s.route, method, json_body),
+                    **s.extra_headers,
+                    **await self._auth.headers(http),
+                    **(headers or {}),
+                }
+                response = await http.request(
+                    method,
+                    self._url(path),
+                    params=params,
+                    json=json_body,
+                    headers=sent_headers,
+                    timeout=s.timeout_seconds,
+                )
+            except OracleAuthError:
+                health.release(resource)
+                raise
+            except httpx.HTTPError as exc:
+                elapsed = _ms(started)
+                fault = health.record(method, resource, elapsed, status=None)
+                self._emit(RequestEvent(method, resource, path, None, elapsed, fault))
+                # THE TYPE AND THE HOST, not `str(exc)`: httpx's connect and
+                # timeout errors often carry NO message, which left this line
+                # reading "transport failure: " with nothing after it and no
+                # way to tell a refused connection from DNS, TLS or a
+                # timeout. The host matters because a gateway in front of
+                # Fusion is a different thing to go and check.
+                logger.warning(
+                    "oracle %s %s: transport failure (host %s): %s",
+                    method,
+                    path,
+                    httpx.URL(self._settings.base_url).host or "?",
+                    transport_detail(exc),
+                )
+                raise OracleUpstreamError(
+                    "Oracle is unreachable.", method=method, path=path
+                ) from exc
+            except BaseException:
+                # Cancelled mid-call: no verdict, but a probe must not stay claimed.
+                health.release(resource)
+                raise
+            elapsed = _ms(started)
+            fault = health.record(method, resource, elapsed, status=response.status_code)
+            self._emit(RequestEvent(method, resource, path, response.status_code, elapsed, fault))
+            if response.status_code == 401 and attempt == 1 and self._auth.invalidate():
+                continue
+            break
+        assert response is not None
+        if response.status_code >= 400 and raise_for_status:
+            code = response.status_code
+            text = response.text[:500]
+            logger.warning("oracle %s %s answered %s", method, path, code)
+            logger.debug("oracle %s %s body: %s", method, path, text)
+            kind: type[OracleUpstreamError] = OracleUpstreamError
+            if code == 404:
+                kind = OracleNotFoundError
+            elif code in (401, 403):
+                kind = OracleAuthError
+            elif method == "POST" and code in (400, 409) and _reads_as_duplicate(text):
+                kind = OracleAlreadyExistsError
+            elif code == 400 and _matches(text, _LOCK_MARKERS):
+                kind = OracleLockedError
+            # LAST of the prose tests, so a refusal Oracle itself made is
+            # never relabelled as the gateway's: the markers are loose, and
+            # "resource not found" could be either on a 404 the branch above
+            # has already claimed.
+            elif _matches(text, _GATEWAY_MARKERS):
+                kind = OracleGatewayError
+            raise kind(
+                f"Oracle answered {code}.",
+                status=code,
+                method=method,
+                path=path,
+                retry_after_seconds=_retry_after(response) if code in (429, 503) else None,
+                body=text,
+                content_type=response.headers.get("content-type", ""),
+            )
+        return response
+
+    @staticmethod
+    def _json(response: httpx.Response, method: str, path: str) -> dict[str, Any]:
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise OracleUpstreamError(
+                "Oracle returned a malformed body.", method=method, path=path
+            ) from exc
+        if not isinstance(body, dict):
+            raise OracleUpstreamError(
+                "Oracle returned an unexpected body.", method=method, path=path
+            )
+        return body
+
+    async def aclose(self) -> None:
+        if self._owned is not None:
+            await self._owned.aclose()
+            self._owned = None
+
+    async def __aenter__(self) -> OracleFusionClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
+    # -- the cache -------------------------------------------------------------
+
+    def _version_key(self, resource: str) -> str:
+        return f"{self._ns}:ver:{resource}"
+
+    async def _cache_key(
+        self,
+        resource: str,
+        path: str,
+        query: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> str:
+        version = await self._cache.get_int(self._version_key(resource))
+        # THE HEADERS ARE PART OF THE KEY, because they can change the ANSWER
+        # and not just its transport: `REST-Framework-Version: 2` is the whole
+        # reason `get` takes them, and a v1 body cached under a v2 reader's
+        # key (or the reverse) is a wrong answer served with no error.
+        digest = hashlib.sha1(
+            json.dumps(
+                [
+                    path,
+                    sorted((k, str(v)) for k, v in query.items()),
+                    sorted((k, str(v)) for k, v in (headers or {}).items()),
+                ]
+            ).encode()
+        ).hexdigest()
+        return f"{self._ns}:{resource}:v{version}:{digest}"
+
+    async def _invalidate(self, path: str) -> None:
+        stale = self._policy.stale_on_write.get(_resource(path), ())
+        longest = max(self._policy.ttls.values(), default=0)
+        for resource in stale:
+            await self._cache.incr(self._version_key(resource), max(longest, 86_400))
+
+    # -- verbs -----------------------------------------------------------------
+
+    async def get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        use_cache: bool = True,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """GET one resource or collection and return its decoded body.
+
+        ``onlyData=true`` is sent unless the caller passes ``onlyData`` itself.
+        ``None`` values in ``params`` are dropped. Read-through cached per the
+        :class:`CachePolicy`; a cache miss or a failing cache falls through to
+        Oracle unchanged.
+
+        ``use_cache=False`` goes to Oracle whatever the cache holds and stores
+        nothing. Use it when a layer ABOVE the client (a persistent lookup
+        store, a mirror) has decided its own answer is out of date: a cached
+        copy of the same read is no newer, and answering from it would re-save
+        the old answer as fresh.
+
+        ``headers`` are extra request headers for this ONE read, and they join
+        the cache key. They exist for ``REST-Framework-Version: 2``, which some
+        resources need to answer a query at all: without it Fusion answers
+        **200 with an empty collection** rather than an error, so a missing
+        header reads as "there is nothing there". Measured on a live pod: the
+        same two-clause filter on ``/positions`` returns 33,391 rows under
+        version 2 and ZERO under the default version 1."""
+        query: dict[str, Any] = {"onlyData": "true"}
+        query.update({k: v for k, v in (params or {}).items() if v is not None})
+        resource = _resource(path)
+        ttl = self._policy.ttls.get(resource, 0)
+        cache_key = ""
+        if use_cache and ttl > 0 and self._settings.configured:
+            cache_key = await self._cache_key(resource, path, query, headers)
+            cached = await self._cache.get(cache_key)
+            if isinstance(cached, dict) and isinstance(cached.get("body"), dict):
+                return cached["body"]
+        response = await self.request("GET", path, params=query, headers=headers)
+        body = self._json(response, "GET", path)
+        if cache_key:
+            if body.get("items") == []:
+                ttl = min(ttl, self._policy.empty_answer_ttl_seconds)
+            await self._cache.set(cache_key, {"path": path, "body": body}, ttl)
+        return body
+
+    async def get_collection(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        use_cache: bool = True,
+        headers: dict[str, str] | None = None,
+    ) -> CollectionPage:
+        """GET a collection as a :class:`CollectionPage` (``use_cache`` and
+        ``headers`` as in :meth:`get`)."""
+        body = await self.get(path, params, use_cache=use_cache, headers=headers)
+        items = body.get("items")
+        rows = [r for r in items if isinstance(r, dict)] if isinstance(items, list) else []
+        raw_total = body.get("totalResults")
+        total = (
+            int(raw_total)
+            if isinstance(raw_total, int) and not isinstance(raw_total, bool) and raw_total >= 0
+            else None
+        )
+        return CollectionPage(rows, bool(body.get("hasMore")), total)
+
+    async def iter_collection(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        page_size: int = MAX_PAGE_SIZE,
+        max_pages: int | None = None,
+        use_cache: bool = True,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Every row of a collection, paging by offset until Oracle says there
+        is no more (or a page comes back empty).
+
+        Pass a stable ``orderBy`` (an id) in ``params`` when the collection can
+        change during the walk, or rows can shift between pages. ``max_pages``
+        bounds the walk for a collection too large to read whole."""
+        offset = 0
+        pages = 0
+        base = dict(params or {})
+        while True:
+            page = await self.get_collection(
+                path, {**base, "limit": page_size, "offset": offset}, use_cache=use_cache
+            )
+            for row in page.items:
+                yield row
+            pages += 1
+            if not page.has_more or not page.items:
+                return
+            if max_pages is not None and pages >= max_pages:
+                return
+            offset += page_size
+
+    async def get_bytes(self, path: str) -> tuple[bytes, str]:
+        """GET a binary enclosure: ``(content, content_type)``. No ``onlyData``
+        and ``Accept: */*``, because an enclosure answers ``406`` to a JSON
+        Accept header. Read whole, not streamed."""
+        response = await self.request("GET", path, headers={"Accept": "*/*"})
+        content_type = response.headers.get("content-type", "application/octet-stream")
+        return response.content, content_type.split(";")[0].strip()
+
+    async def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST (create) and return the record Oracle answers. A refusal that
+        names a taken key raises :class:`OracleAlreadyExistsError`."""
+        await self._invalidate(path)
+        response = await self.request(
+            "POST", path, json_body=body, headers={"Content-Type": "application/json"}
+        )
+        answered = self._json(response, "POST", path)
+        await self._invalidate(path)
+        return answered
+
+    async def patch(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """PATCH a record by id and return the updated record, so a caller can
+        read back what actually landed."""
+        await self._invalidate(path)
+        response = await self.request(
+            "PATCH", path, json_body=body, headers={"Content-Type": _ADF_ITEM}
+        )
+        answered = self._json(response, "PATCH", path)
+        await self._invalidate(path)
+        return answered
