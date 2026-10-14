@@ -2,7 +2,7 @@ import asyncio
 
 from asas_llm import context
 from asas_llm.tracing import NullTracer, traced
-from tests.conftest import run
+from conftest import run
 
 
 def test_bind_generates_a_session_when_none_given():

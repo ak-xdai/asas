@@ -174,6 +174,79 @@ SNIPPETS: dict[str, BootSnippet] = {
             "# Postgres-only DDL; SQLite records the version and creates nothing",
         ),
     ),
+    "tenancy": BootSnippet(
+        imports=("import asas_tenancy", "from sqlalchemy import event"),
+        setup=(
+            "# Pin the request's tenant on every transaction, so Postgres row-level\n"
+            "# security scopes each query. Bind it once per request from a VERIFIED\n"
+            "# credential: asas_tenancy.bind_tenant(<tenant id from the token>).",
+            "@event.listens_for(Session, \"after_begin\")\n"
+            "def _pin_tenant(session, transaction, connection):\n"
+            "    tenant = asas_tenancy.maybe_tenant_id()\n"
+            "    if tenant is not None:\n"
+            "        asas_tenancy.set_tenant_guc(connection, tenant)",
+            "# Protect each tenant table in your own migrations: "
+            "asas_tenancy.enable_rls(\"<table>\")  # TODO",
+        ),
+    ),
+    "audit": BootSnippet(
+        imports=("import asas_audit",),
+        setup=(
+            "def current_tenant() -> str:\n"
+            "    ...  # TODO: the verified tenant id of this request (a token claim)",
+            "app.include_router(asas_audit.build_router(get_session, tenant=current_tenant))",
+            "# Record a business action IN the unit of work that makes the change, so the\n"
+            "# audit row commits or rolls back with it: asas_audit.append(session, ...).",
+        ),
+        boot=("asas_audit.migrate(engine)",),
+    ),
+    "oracle": BootSnippet(
+        imports=("import functools", "import asas_oracle"),
+        setup=(
+            "@functools.cache  # ONE client per process: it holds the connection pool and the cache\n"
+            "def oracle_client() -> asas_oracle.OracleFusionClient:\n"
+            "    # An empty base URL means Oracle is off here: the client reports\n"
+            "    # configured == False instead of failing the boot.\n"
+            "    # Close at shutdown: await oracle_client().aclose() in your lifespan hook.\n"
+            "    return asas_oracle.OracleFusionClient(asas_oracle.OracleSettings(\n"
+            "        base_url=settings.oracle_base_url,\n"
+            "        username=settings.oracle_username,\n"
+            "        password=settings.oracle_password,\n"
+            "    ))",
+            "# lookups = asas_oracle.OracleLookups(oracle_client())  # one per process\n"
+            "# await lookups.names(\"grade\", grade_ids)  "
+            "# TODO: the integration user needs read access to the resources you call",
+        ),
+        settings_fields=(
+            ("oracle_base_url", "str", '""'),
+            ("oracle_username", "str", '""'),
+            ("oracle_password", "str", '""'),
+        ),
+    ),
+    "graph": BootSnippet(
+        imports=("import functools", "import asas_graph"),
+        setup=(
+            "@functools.cache  # ONE client per process: fresh clients per call would\n"
+            "def graph_client() -> asas_graph.GraphClient:  # re-pay the token round trip\n"
+            "    # Built on first use so an unconfigured scaffold still boots; an empty\n"
+            "    # tenant/client/secret fails loud here with GraphConfigError.\n"
+            "    # Close at shutdown: await graph_client().aclose() in your lifespan hook.\n"
+            "    return asas_graph.GraphClient(asas_graph.GraphSettings(\n"
+            "        tenant_id=settings.graph_tenant_id,\n"
+            "        client_id=settings.graph_client_id,\n"
+            "        client_secret=settings.graph_client_secret,\n"
+            "    ))",
+            "# teams = asas_graph.TeamsMeetings(graph_client(), organizer=settings.graph_organizer)",
+            "# await teams.create(subject, start, end, attendees=[asas_graph.Attendee(email)])  "
+            "# TODO: needs Calendars.ReadWrite (application), admin-consented",
+        ),
+        settings_fields=(
+            ("graph_tenant_id", "str", '""'),
+            ("graph_client_id", "str", '""'),
+            ("graph_client_secret", "str", '""'),
+            ("graph_organizer", "str", '""'),
+        ),
+    ),
     "llm": BootSnippet(
         imports=("import asas_llm", "import asas_llm.middleware", "from pathlib import Path"),
         setup=(

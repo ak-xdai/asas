@@ -11,7 +11,7 @@ from asas_llm.errors import EmptyOutput, GenerationFailed, PromptUnavailable, St
 from asas_llm.prompts import InMemoryPromptStore, Prompt
 from asas_llm.runners import LLMRunner, ModelOptions, message_text, static_model, to_chat_prompt_template
 from asas_llm.tracing import NullTracer
-from tests.conftest import run
+from conftest import run
 
 
 class Verdict(BaseModel):

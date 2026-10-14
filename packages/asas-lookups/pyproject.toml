@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asas-lookups"
-version = "0.13.2"
+version = "0.13.3"
 description = "Asas reference-data / lookups module: generic bilingual lookup types, values, translations and aliases with a FastAPI read + admin API."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "fastapi>=0.110,<1",
-    "sqlmodel>=0.0.16",
+    "sqlmodel>=0.0.16,<0.0.45",
     "alembic>=1.13",
 ]
 
