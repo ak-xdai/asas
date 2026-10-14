@@ -19,9 +19,13 @@ def _fake_repo(tmp_path, version="0.5.0", changelog=None, dunder=None):
         f'__version__ = "{dunder or version}"\n')
     (pkg / "CHANGELOG.md").write_text(f"# Changelog\n\n## {changelog or version} — today\n")
     subprocess.run(["git", "init", "-q", str(root)], check=True)
+    # The identity lives in the repo config, not on the commit command: the
+    # annotated tag that cut_release() creates needs a committer too, and a
+    # CI runner has no global identity to fall back on.
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
     subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-qm", "seed"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "seed"], check=True)
     return root, spec
 
 
