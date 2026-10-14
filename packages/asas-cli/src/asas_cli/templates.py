@@ -200,6 +200,29 @@ SNIPPETS: dict[str, BootSnippet] = {
         ),
         boot=("asas_audit.migrate(engine)",),
     ),
+    "oracle": BootSnippet(
+        imports=("import functools", "import asas_oracle"),
+        setup=(
+            "@functools.cache  # ONE client per process: it holds the connection pool and the cache\n"
+            "def oracle_client() -> asas_oracle.OracleFusionClient:\n"
+            "    # An empty base URL means Oracle is off here: the client reports\n"
+            "    # configured == False instead of failing the boot.\n"
+            "    # Close at shutdown: await oracle_client().aclose() in your lifespan hook.\n"
+            "    return asas_oracle.OracleFusionClient(asas_oracle.OracleSettings(\n"
+            "        base_url=settings.oracle_base_url,\n"
+            "        username=settings.oracle_username,\n"
+            "        password=settings.oracle_password,\n"
+            "    ))",
+            "# lookups = asas_oracle.OracleLookups(oracle_client())  # one per process\n"
+            "# await lookups.names(\"grade\", grade_ids)  "
+            "# TODO: the integration user needs read access to the resources you call",
+        ),
+        settings_fields=(
+            ("oracle_base_url", "str", '""'),
+            ("oracle_username", "str", '""'),
+            ("oracle_password", "str", '""'),
+        ),
+    ),
     "mcp": BootSnippet(
         imports=("import asas_mcp", "from starlette.routing import Route"),
         setup=(
