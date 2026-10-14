@@ -16,6 +16,8 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
+import asas_tenancy
+
 from conftest import ORG_A, append_and_commit
 
 
@@ -24,7 +26,7 @@ def test_update_is_refused(requires_postgres):
     append_and_commit(engine, ORG_A)
     with pytest.raises(Exception) as caught:
         with engine.begin() as conn:
-            conn.execute(text("SET LOCAL app.tenant_id = 'org-a'"))
+            asas_tenancy.set_tenant_guc(conn, ORG_A)
             conn.execute(text("UPDATE audit_event SET actor = 'mallory'"))
     assert "append-only" in str(caught.value)
 
@@ -34,20 +36,27 @@ def test_delete_is_refused(requires_postgres):
     append_and_commit(engine, ORG_A)
     with pytest.raises(Exception) as caught:
         with engine.begin() as conn:
-            conn.execute(text("SET LOCAL app.tenant_id = 'org-a'"))
+            asas_tenancy.set_tenant_guc(conn, ORG_A)
             conn.execute(text("DELETE FROM audit_event"))
     assert "append-only" in str(caught.value)
 
 
 def test_the_error_names_the_operation(requires_postgres):
-    """So the failure reads as a policy rather than as a mysterious constraint."""
+    """So the failure reads as a policy rather than as a mysterious constraint —
+    for BOTH refused operations, not just the one the copy-paste happened to
+    cover."""
     engine = requires_postgres
     append_and_commit(engine, ORG_A)
     with pytest.raises(Exception) as caught:
         with engine.begin() as conn:
-            conn.execute(text("SET LOCAL app.tenant_id = 'org-a'"))
+            asas_tenancy.set_tenant_guc(conn, ORG_A)
             conn.execute(text("UPDATE audit_event SET actor = 'mallory'"))
     assert "UPDATE" in str(caught.value)
+    with pytest.raises(Exception) as caught:
+        with engine.begin() as conn:
+            asas_tenancy.set_tenant_guc(conn, ORG_A)
+            conn.execute(text("DELETE FROM audit_event"))
+    assert "DELETE" in str(caught.value)
 
 
 def test_insert_is_still_allowed(requires_postgres):
@@ -58,7 +67,7 @@ def test_insert_is_still_allowed(requires_postgres):
     append_and_commit(engine, ORG_A)
     append_and_commit(engine, ORG_A, action="second.thing")
     with engine.begin() as conn:
-        conn.execute(text("SET LOCAL app.tenant_id = 'org-a'"))
+        asas_tenancy.set_tenant_guc(conn, ORG_A)
         assert conn.execute(text("SELECT count(*) FROM audit_event")).scalar() == 2
 
 

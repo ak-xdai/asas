@@ -29,7 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from asas_tenancy.guc import DEFAULT_GUC, set_tenant_guc
-from asas_tenancy.policy import has_rls, policy_name
+from asas_tenancy.policy import _identifier, has_rls, policy_name
 
 #: Set this in CI. When it is set, a database that cannot enforce isolation is a
 #: failure rather than a skip, so the checks can never quietly stop running.
@@ -37,8 +37,15 @@ REQUIRE_ENV = "ASAS_REQUIRE_RLS"
 
 
 def is_required() -> bool:
-    """Whether enforcement is mandatory in this environment (see :data:`REQUIRE_ENV`)."""
-    return os.environ.get(REQUIRE_ENV, "").strip().lower() in {"1", "true", "yes"}
+    """Whether enforcement is mandatory in this environment (see :data:`REQUIRE_ENV`).
+
+    Family semantics (matches ``ASAS_REQUIRE_AZURE`` in asas-storage): any
+    non-empty value enables, with the explicit off-words tolerated so a
+    templated ``=0`` does not silently ENABLE. The dangerous direction is a
+    truthy-looking value ("on", "enabled") being read as off and enforcement
+    coverage silently vanishing — that cannot happen under any-non-empty."""
+    value = os.environ.get(REQUIRE_ENV, "").strip().lower()
+    return value not in {"", "0", "false", "no"}
 
 
 @dataclass(frozen=True)
@@ -212,7 +219,9 @@ def visible_keys(engine: Engine, table: str, tenant_id: Any, *, key: str = "id",
     """
     with engine.begin() as conn:
         set_tenant_guc(conn, tenant_id, guc=guc)
-        rows = conn.execute(text(f"SELECT {key} FROM {table}")).scalars().all()
+        rows = conn.execute(
+            text(f"SELECT {_identifier(key, 'column')} FROM {_identifier(table, 'table')}")
+        ).scalars().all()
     return set(rows)
 
 
@@ -252,7 +261,7 @@ def assert_unpinned_sees_nothing(engine: Engine, table: str) -> None:
     """
     require_enforced(engine)
     with engine.begin() as conn:
-        count = conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()
+        count = conn.execute(text(f"SELECT count(*) FROM {_identifier(table, 'table')}")).scalar()
     if count:
         raise AssertionError(
             f"{table!r} returned {count} row(s) with no tenant pinned. Isolation "

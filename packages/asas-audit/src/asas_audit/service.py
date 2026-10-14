@@ -24,14 +24,22 @@ it, so a hash of a large payload, a network call, or a password KDF inside the s
 transaction turns a per-tenant lock into a per-tenant stall. Compute first, append
 last.
 
-SQLite has no advisory locks and needs none: it serialises writers at the database,
-which is the same guarantee by a different mechanism. That is why the append path
-branches on the dialect rather than requiring Postgres.
+SQLite has no advisory locks — and its writer serialisation is NOT enough: the
+tail READ happens before the INSERT, outside any write lock, so two threads can
+both read the same tail and fork the chain even though their INSERTs serialise.
+On SQLite the append path therefore holds a process-wide mutex across the tail
+read and the flush (single-process is the deployment model SQLite implies; a
+multi-process SQLite host is outside this package's guarantee and documented as
+such). A UNIQUE(org_id, hash_prev) index backstops both engines declaratively:
+a fork that slips past any lock becomes the loser's IntegrityError, never a
+silent verification break weeks later.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+import threading
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
 from sqlalchemy import text
@@ -49,9 +57,17 @@ _LOCK = text(
 )
 
 
-def _lock_chain(session: Session, org_id: str) -> None:
+#: SQLite's writer lock serialises INSERTs, not the tail READ before them —
+#: without this mutex two threads read the same tail and fork the chain.
+_SQLITE_APPEND_MUTEX = threading.Lock()
+
+
+def _lock_chain(session: Session, org_id: str):
+    """Return a context manager holding the chain closed for this append."""
     if session.get_bind().dialect.name == "postgresql":
         session.execute(_LOCK, {"key": str(org_id)})
+        return nullcontext()  # the advisory lock releases with the transaction
+    return _SQLITE_APPEND_MUTEX
 
 
 def _tail(session: Session, org_id: str) -> Optional[AuditEvent]:
@@ -84,41 +100,63 @@ def append(
     available after the caller flushes.
     """
     org_key = str(org_id)
-    _lock_chain(session, org_key)
 
-    # The flush is what makes the tail read see this transaction's earlier
-    # appends: two entries in one unit of work must chain to each other, not both
-    # to the row that preceded them.
-    session.flush()
-    tail = _tail(session, org_key)
-    hash_prev = bytes(tail.hash_current) if tail is not None else None
+    # ── Normalise BEFORE any lock ("compute first, append last") ──
+    #
+    # occurred_at is normalised to UTC at the door, so the value hashed is the
+    # value that round-trips on every engine (SQLite stores the wall clock and
+    # drops the offset; a non-UTC aware input would otherwise verify as
+    # tampered). A naive input is declared to be UTC — the only reading that
+    # is stable across processes.
+    when = occurred_at if occurred_at is not None else datetime.now(timezone.utc)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    when = when.astimezone(timezone.utc)
+    # The payload is stored exactly as hashed: one round trip through the
+    # canonical encoding up front, so (a) a non-JSON-safe value fails HERE, in
+    # append, never as a TypeError at the host's commit after we reported
+    # success, and (b) what verify() reads back re-encodes to the same bytes
+    # regardless of the host's json_serializer or non-string dict keys.
+    from asas_audit.chain import normalize_payload
+    normalized_payload = normalize_payload(dict(payload or {}))
 
-    row = AuditEvent(
-        org_id=org_key,
-        actor=actor,
-        action=action,
-        resource_type=resource_type,
-        resource_id=str(resource_id),
-        payload=dict(payload or {}),
-        hash_prev=hash_prev,
-    )
-    if occurred_at is not None:
-        row.occurred_at = occurred_at
+    lock = _lock_chain(session, org_key)
+    with lock:
+        # The flush is what makes the tail read see this transaction's earlier
+        # appends: two entries in one unit of work must chain to each other,
+        # not both to the row that preceded them.
+        session.flush()
+        tail = _tail(session, org_key)
+        hash_prev = bytes(tail.hash_current) if tail is not None else None
 
-    row.hash_current = compute_hash(
-        hash_prev,
-        chain_payload(
-            event_id=row.id,
+        row = AuditEvent(
             org_id=org_key,
-            actor=row.actor,
-            action=row.action,
-            resource_type=row.resource_type,
-            resource_id=row.resource_id,
-            payload=row.payload,
-            occurred_at=row.occurred_at,
-        ),
-    )
-    session.add(row)
+            actor=actor,
+            action=action,
+            resource_type=resource_type,
+            resource_id=str(resource_id),
+            payload=normalized_payload,
+            hash_prev=hash_prev,
+            occurred_at=when,
+        )
+        row.hash_current = compute_hash(
+            hash_prev,
+            chain_payload(
+                event_id=row.id,
+                org_id=org_key,
+                actor=row.actor,
+                action=row.action,
+                resource_type=row.resource_type,
+                resource_id=row.resource_id,
+                payload=row.payload,
+                occurred_at=row.occurred_at,
+            ),
+        )
+        session.add(row)
+        # On SQLite the mutex must cover the INSERT itself, or a second thread
+        # could still interleave between our tail read and our write.
+        if session.get_bind().dialect.name != "postgresql":
+            session.flush()
     return row
 
 
@@ -131,11 +169,15 @@ def verify(session: Session, org_id: Any) -> VerifyReport:
     tamper cases are asserted without a database and this function only has to
     get the query right.
     """
+    # Streamed, not materialised: an append-only table's whole history in one
+    # .all() is O(n) memory per verify call; verify_rows only ever needs
+    # sequential access, so a server-side cursor keeps this O(1).
     rows = session.exec(
         select(AuditEvent)
         .where(AuditEvent.org_id == str(org_id))
         .order_by(AuditEvent.seq)
-    ).all()
+        .execution_options(yield_per=500)
+    )
     return verify_rows(str(org_id), rows)
 
 

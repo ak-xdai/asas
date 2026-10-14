@@ -74,11 +74,13 @@ def upgrade() -> None:
         sa.Column("hash_current", sa.LargeBinary(32), nullable=False),
     )
     op.create_index("ix_audit_event_id", "audit_event", ["id"], unique=True)
-    op.create_index("ix_audit_event_org_id", "audit_event", ["org_id"])
     # The tail read on every append. Raw SQL for the DESC, which Alembic's
     # create_index cannot express and which is the whole reason for the index:
     # without it the newest-row-per-tenant lookup sorts.
     op.execute("CREATE INDEX ix_audit_event_org_seq ON audit_event (org_id, seq DESC)")
+    # Declarative never-fork backstop; NULL genesis rows exempt on both engines.
+    op.create_index("ix_audit_event_org_hash_prev", "audit_event",
+                    ["org_id", "hash_prev"], unique=True)
     op.create_index(
         "ix_audit_event_resource",
         "audit_event",
@@ -107,7 +109,7 @@ def downgrade() -> None:
     asas_tenancy.disable_rls("audit_event")
     op.drop_index("ix_audit_event_actor", table_name="audit_event")
     op.drop_index("ix_audit_event_resource", table_name="audit_event")
+    op.drop_index("ix_audit_event_org_hash_prev", table_name="audit_event")
     op.execute("DROP INDEX IF EXISTS ix_audit_event_org_seq")
-    op.drop_index("ix_audit_event_org_id", table_name="audit_event")
     op.drop_index("ix_audit_event_id", table_name="audit_event")
     op.drop_table("audit_event")

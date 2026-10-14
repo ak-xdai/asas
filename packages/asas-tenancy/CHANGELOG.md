@@ -11,6 +11,14 @@ First release. Extracted from a host application's working implementation rather
 than written from scratch, so the shapes below are the ones that survived
 production rather than a first guess at them.
 
+- **`pin_engine` commits the pin.** `set_config(..., false)` is session-level but
+  transactional, so the first rollback on a pooled connection erased it and every
+  later checkout ran tenant-blind. The connect hook now commits, which pins the
+  setting for the connection's lifetime.
+- **Conformance queries validate their identifiers** (`visible_keys`,
+  `assert_unpinned_sees_nothing`) before interpolating them.
+- **`ASAS_REQUIRE_RLS`** follows the family's any-non-empty rule: every value
+  enables it except the empty string, `0`, `false` and `no`.
 - **The tenant context** (`bind_tenant`, `current_tenant_id`, `maybe_tenant_id`,
   `tenant_scope`). `current_tenant_id()` raises on an unbound context rather than
   returning `None`, because "no tenant" and "all tenants" must never be the same

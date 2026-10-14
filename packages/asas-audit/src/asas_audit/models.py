@@ -28,7 +28,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Column, Index, Integer, LargeBinary
+from sqlalchemy import DateTime, BigInteger, Column, Index, Integer, LargeBinary
 from sqlalchemy import JSON
 from sqlmodel import Field, SQLModel
 
@@ -66,6 +66,13 @@ class AuditEvent(SQLModel, table=True):
         Index("ix_audit_event_resource", "org_id", "resource_type", "resource_id",
               "occurred_at"),
         Index("ix_audit_event_actor", "org_id", "actor", "occurred_at"),
+        # The never-fork invariant, stated declaratively: a fork IS two rows
+        # sharing (org_id, hash_prev). The locks make forks queue; this index
+        # makes any fork that slips past them a loud IntegrityError for the
+        # loser instead of a silent verification break weeks later. (NULL
+        # genesis rows are exempt — both engines treat NULLs as distinct —
+        # and the genesis race is covered by the locks.)
+        Index("ix_audit_event_org_hash_prev", "org_id", "hash_prev", unique=True),
     )
 
     #: ``BigInteger`` because an audit log is the table least likely to be
@@ -81,8 +88,10 @@ class AuditEvent(SQLModel, table=True):
             autoincrement=True,
         ),
     )
-    id: str = Field(default_factory=_new_id, index=True, max_length=64)
-    org_id: str = Field(index=True, max_length=64)
+    id: str = Field(default_factory=_new_id, unique=True, index=True, max_length=64)
+    # org_id is served by the leading column of every composite above — a
+    # standalone index would be pure write amplification on the append path.
+    org_id: str = Field(max_length=64)
 
     #: Who acted. A host's own principal string (a subject claim, a service name),
     #: not a foreign key: the actor may be a system, and an account that is later
@@ -98,7 +107,14 @@ class AuditEvent(SQLModel, table=True):
     #: and it is part of the hash, so it cannot be revised afterwards.
     payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
-    occurred_at: datetime = Field(default_factory=_utcnow)
+    #: Stored timezone-aware; append() normalises to UTC before hashing, so
+    #: the value hashed is the value that round-trips on every engine. The
+    #: sa_column matches the migration (timestamptz) — the two schema
+    #: definitions must state one type or metadata-created databases drift.
+    occurred_at: datetime = Field(
+        default_factory=_utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
     #: The link to the previous entry for this tenant. NULL for the first one.
     hash_prev: Optional[bytes] = Field(

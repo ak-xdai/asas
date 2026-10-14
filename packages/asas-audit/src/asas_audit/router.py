@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import HTTPException, APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from asas_audit import service
@@ -61,14 +61,23 @@ class VerifyReportRead(BaseModel):
     breaks: list[ChainBreakRead]
 
 
-def build_router(get_session: Callable, *, tenant: Callable) -> APIRouter:
-    """The host passes its session dependency and its tenant dependency.
+def build_router(get_session: Callable, *, tenant: Optional[Callable] = None) -> APIRouter:
+    """The host passes its session dependency and, optionally, its tenant
+    dependency.
 
-    ``tenant`` is a dependency returning the current tenant id. It is a parameter
-    rather than an import because tenancy stays a host concept in this family: a
-    host may resolve it from a token claim, a context variable, or a
-    single-tenant constant, and this package does not need to know which.
+    ``tenant`` is a dependency returning the current tenant id — a token claim,
+    a context variable, or a single-tenant constant; this package does not need
+    to know which. When omitted it defaults to the family's fail-closed
+    resolver, ``asas_tenancy.current_tenant_id``, which RAISES when no tenant
+    is bound: a hand-rolled wrapper returning ``None`` would instead filter on
+    ``org_id == 'None'`` and serve an empty history plus an "intact chain of 0
+    events" — a silently wrong audit surface.
     """
+    if tenant is None:
+        from asas_tenancy import current_tenant_id
+
+        def tenant() -> str:  # fail-closed default
+            return str(current_tenant_id())
     router = APIRouter(prefix="/audit", tags=["audit"])
 
     @router.get("/events", response_model=list[AuditEventRead])
@@ -84,6 +93,13 @@ def build_router(get_session: Callable, *, tenant: Callable) -> APIRouter:
         limit: int = Query(100, ge=1, le=500),
         offset: int = Query(0, ge=0),
     ) -> list[AuditEventRead]:
+        if resource_id is not None and resource_type is None:
+            # The service refuses this pair with a ValueError; a client input
+            # mistake must answer 400, never a 500 with a server traceback.
+            raise HTTPException(
+                status_code=400,
+                detail="resource_id requires resource_type",
+            )
         rows = service.history(
             session,
             org_id=org_id,

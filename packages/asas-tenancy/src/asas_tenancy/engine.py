@@ -26,7 +26,7 @@ from typing import Any, Iterator
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
-from asas_tenancy.guc import DEFAULT_GUC, validate_guc_name
+from asas_tenancy.guc import supports_guc, DEFAULT_GUC, validate_guc_name
 from asas_tenancy.policy import has_rls
 
 
@@ -40,7 +40,7 @@ def pin_engine(engine: Engine, tenant_id: Any, *, guc: str = DEFAULT_GUC) -> Eng
 
     Returns the engine, so it can be used inline.
     """
-    if not has_rls(engine.dialect.name):
+    if not supports_guc(engine):
         return engine
     validate_guc_name(guc)
     value = str(tenant_id)
@@ -53,6 +53,15 @@ def pin_engine(engine: Engine, tenant_id: Any, *, guc: str = DEFAULT_GUC) -> Eng
             # supported driver takes pyformat or format for a text query, and
             # the value is still a bound parameter rather than interpolated.
             cursor.execute(f"SELECT set_config('{guc}', %s, false)", (value,))
+            # set_config(..., false) is session-level but still TRANSACTIONAL:
+            # without this commit, the first ROLLBACK on the pooled connection
+            # (an exception, or the pool's reset_on_return) erases the pin, the
+            # connect event never re-fires, and every later checkout runs
+            # tenant-blind — fail-closed RLS then returns zero rows and a sweep
+            # "succeeds" having processed nothing. Committing here pins the
+            # setting for the connection's lifetime (SQLAlchemy's documented
+            # recipe for connect-time session state).
+            dbapi_connection.commit()
         finally:
             cursor.close()
 

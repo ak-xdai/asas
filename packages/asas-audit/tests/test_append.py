@@ -117,13 +117,50 @@ def test_occurred_at_can_predate_the_write(session):
         resource_type="thing", resource_id="1", occurred_at=when,
     )
     session.commit()
+    asas_tenancy.set_tenant_guc(session, ORG_A)  # the pin is transaction-local
 
-    # Compared through the canonical form rather than with ``==``, because that
-    # is the comparison the chain itself makes: SQLite has no timezone type and
-    # hands the value back naive, so a bare equality would be asserting a
-    # property of the driver instead of one of this package.
-    assert chain.canonical_timestamp(row.occurred_at) == chain.canonical_timestamp(when)
-    assert asas_audit.verify(session, ORG_A).is_intact
+    # Read the value back FRESH — asserting on `row` under expire_on_commit=
+    # False compares append()'s input with itself and would pass over any
+    # storage corruption. Compared through the canonical form, because that is
+    # the comparison the chain itself makes across engines.
+    session.expire_all()
+    stored = session.get(type(row), row.seq)
+    assert chain.canonical_timestamp(stored.occurred_at) == chain.canonical_timestamp(when)
+    report = asas_audit.verify(session, ORG_A)
+    assert report.is_intact and report.events_checked == 1
+
+
+def test_a_non_utc_occurred_at_round_trips_and_verifies(session):
+    """The false-tamper trap: append() normalises to UTC before hashing, so an
+    aware non-UTC input must verify intact on BOTH engines (SQLite stores the
+    wall clock and drops the offset; without normalisation the recomputed hash
+    differs and an untouched chain reports as edited)."""
+    from datetime import timedelta
+    local = datetime(2026, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=4)))
+    asas_audit.append(
+        session, org_id=ORG_A, actor="worker", action="thing.done",
+        resource_type="thing", resource_id="tz", occurred_at=local,
+    )
+    session.commit()
+    asas_tenancy.set_tenant_guc(session, ORG_A)  # the pin is transaction-local
+    report = asas_audit.verify(session, ORG_A)
+    assert report.is_intact and report.events_checked == 1
+
+
+def test_payload_is_stored_exactly_as_hashed(session):
+    """Non-JSON-native values normalise ONCE, in append(): what verify() reads
+    back re-encodes to the same bytes, and a non-serialisable value fails here,
+    never as a TypeError at the host's commit after we reported success."""
+    when = datetime(2026, 2, 2, tzinfo=timezone.utc)
+    asas_audit.append(
+        session, org_id=ORG_A, actor="w", action="a.b",
+        resource_type="t", resource_id="pl",
+        payload={2: "int-key", "when": when},   # int key + datetime value
+    )
+    session.commit()
+    asas_tenancy.set_tenant_guc(session, ORG_A)  # the pin is transaction-local
+    report = asas_audit.verify(session, ORG_A)
+    assert report.is_intact and report.events_checked == 1
 
 
 def test_each_tenant_has_its_own_chain(migrated):

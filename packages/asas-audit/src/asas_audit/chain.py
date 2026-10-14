@@ -29,6 +29,24 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
 
+def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """One round trip through the canonical encoding, keys stringified first.
+
+    ``json.dumps(sort_keys=True)`` cannot even ORDER mixed str/int keys (it
+    raises comparing them), and the JSON column will stringify keys on storage
+    anyway — so append() normalises up front and stores exactly what it
+    hashed, making the write-side and read-side bytes identical by
+    construction."""
+    def _str_keys(value):
+        if isinstance(value, dict):
+            return {str(k): _str_keys(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_str_keys(v) for v in value]
+        return value
+
+    return json.loads(canonical_bytes(_str_keys(payload)))
+
+
 def canonical_bytes(payload: dict[str, Any]) -> bytes:
     """The one encoding, used by both the writer and the verifier.
 
@@ -145,10 +163,10 @@ class VerifyReport:
         return self.breaks[0] if self.breaks else None
 
 
-def verify_rows(org_id: Any, rows: Sequence[Any]) -> VerifyReport:
+def verify_rows(org_id: Any, rows) -> VerifyReport:
     """Re-derive the chain over ``rows``, which must be ordered by ``seq`` ascending.
 
-    ``rows`` are anything with the stored columns as attributes (the package's own
+    ``rows`` is any ITERABLE (a list, or a streamed result) of anything with the stored columns as attributes (the package's own
     ORM row, a plain namedtuple, a test double). Keeping it structural is what
     makes this function testable without a database, which in turn is what makes
     the tamper cases cheap to assert.
@@ -163,6 +181,7 @@ def verify_rows(org_id: Any, rows: Sequence[Any]) -> VerifyReport:
     """
     breaks: list[ChainBreak] = []
     prev_hash: Optional[bytes] = None
+    checked = 0
     for row in rows:
         expected = compute_hash(
             prev_hash,
@@ -196,7 +215,8 @@ def verify_rows(org_id: Any, rows: Sequence[Any]) -> VerifyReport:
         # does not necessarily invalidate every row after it: a single edited
         # entry then reports as one break rather than as a cascade.
         prev_hash = stored
-    return VerifyReport(org_id=org_id, events_checked=len(rows), breaks=tuple(breaks))
+        checked += 1
+    return VerifyReport(org_id=org_id, events_checked=checked, breaks=tuple(breaks))
 
 
 def _break(row: Any, expected: bytes, stored: bytes, detail: str) -> ChainBreak:
