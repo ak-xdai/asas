@@ -4,7 +4,7 @@ Fusion refuses some requests outright rather than trimming them, and which
 resources do so is a property of the resource, not of any product:
 
 * a **page cap**: a ``limit`` over the cap is refused (200 on most resources,
-  :data:`asas_oracle_hcm.MAX_PAGE_SIZE`);
+  :data:`asas_oracle.MAX_PAGE_SIZE`);
 * an **offset ceiling**: an ``offset`` at or past it is refused (FND-2420, at
   10,000 on the resources that have one), and so is the WHOLE request when
   ``offset + limit`` crosses it, not just the part past it. Such a collection

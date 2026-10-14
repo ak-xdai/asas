@@ -27,7 +27,7 @@ def test_table_owning_packages_call_migrate_in_boot():
 
 
 def test_table_less_packages_have_no_boot_lines():
-    table_less = {"validation", "storage", "ratelimit", "mcp", "tenancy", "oracle-hcm"}
+    table_less = {"validation", "storage", "ratelimit", "mcp", "tenancy", "oracle"}
     for key in table_less:
         assert SNIPPETS[key].boot == (), key
 
@@ -40,7 +40,7 @@ def test_router_packages_include_a_router_in_setup():
 
 
 def test_router_less_packages_never_include_a_router():
-    router_less = {"storage", "ratelimit", "jobs", "access", "workflow", "search", "tenancy", "oracle-hcm"}
+    router_less = {"storage", "ratelimit", "jobs", "access", "workflow", "search", "tenancy", "oracle"}
     for key in router_less:
         setup_text = "\n".join(SNIPPETS[key].setup)
         assert "include_router" not in setup_text, key
@@ -53,5 +53,5 @@ def test_ratelimit_declares_its_own_settings_fields():
 
 def test_most_packages_declare_no_extra_settings_fields():
     for key, snippet in SNIPPETS.items():
-        if key not in {"ratelimit", "oracle-hcm"}:
+        if key not in {"ratelimit", "oracle"}:
             assert snippet.settings_fields == (), key

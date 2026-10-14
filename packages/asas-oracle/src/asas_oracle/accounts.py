@@ -28,7 +28,7 @@ version 3 it stops at 25 children and says nothing about having done so (29
 roles held, 25 returned).
 
 Sending ``REST-Framework-Version: 2`` would allow a single query, and
-:data:`~asas_oracle_hcm.REST_FRAMEWORK_V2` is there for a caller who has
+:data:`~asas_oracle.REST_FRAMEWORK_V2` is there for a caller who has
 checked that every hop forwards it. An API gateway in the middle may not,
 and an unforwarded header fails the same silent way, so the version 1 form
 is what this module uses: it is correct on every route.

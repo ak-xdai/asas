@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import pytest
 
-from asas_oracle_hcm import (
+from asas_oracle import (
     NullCache,
     OracleFusionClient,
     OracleLookups,

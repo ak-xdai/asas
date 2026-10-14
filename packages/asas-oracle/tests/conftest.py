@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 
-from asas_oracle_hcm import OracleFusionClient, OracleSettings
+from asas_oracle import OracleFusionClient, OracleSettings
 
 BASE = "https://pod.example.com/hcmRestApi/resources/11.13.18.05"
 

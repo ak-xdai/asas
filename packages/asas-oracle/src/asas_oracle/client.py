@@ -24,7 +24,7 @@ state TRANSITION endpoint such as ``POST .../action/move`` is not, because a
 repeat advances the record again.
 
 **Circuit breakers guard the reads**, one per resource plus one for the host
-(:class:`asas_oracle_hcm.BreakerPolicy`): after consecutive outages they fail
+(:class:`asas_oracle.BreakerPolicy`): after consecutive outages they fail
 at once with :class:`OracleUnavailableError` instead of each waiting out the
 timeout. Writes are counted, never refused.
 :attr:`OracleFusionClient.health` carries the breaker and per-resource call
@@ -61,7 +61,7 @@ from .upstream import BreakerPolicy, RequestEvent, UpstreamHealth
 
 logger = logging.getLogger(__name__)
 
-#: Oracle's own page cap on most resources (see :mod:`asas_oracle_hcm.paging`
+#: Oracle's own page cap on most resources (see :mod:`asas_oracle.paging`
 #: for the cap and the offset ceiling).
 MAX_PAGE_SIZE = 200
 

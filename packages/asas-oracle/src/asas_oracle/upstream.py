@@ -43,7 +43,7 @@ from typing import Any, Callable
 # counter is CLOSED when the request ends rather than unset: a call that work
 # makes later counts against nothing.
 _calls: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
-    "asas_oracle_hcm_calls", default=None
+    "asas_oracle_calls", default=None
 )
 
 

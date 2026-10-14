@@ -58,7 +58,7 @@ class OracleSettings:
     oauth_client_secret: str = ""
     oauth_scope: str = ""
     extra_headers: Mapping[str, str] = field(default_factory=dict)
-    #: Which way this deployment reaches Fusion (see :mod:`asas_oracle_hcm.routing`).
+    #: Which way this deployment reaches Fusion (see :mod:`asas_oracle.routing`).
     #: It is CONFIGURATION and never inferred from the address, so an address
     #: that contradicts it is a fault to report rather than a shape to follow.
     route: str = "direct"

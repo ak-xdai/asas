@@ -39,12 +39,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [asas-lookups, asas-validation, asas-storage, asas-ratelimit, asas-jobs, asas-access, asas-workflow, asas-notifications, asas-search, asas-mcp, asas-tenancy, asas-audit, asas-oracle-hcm]
+        package: [asas-lookups, asas-validation, asas-storage, asas-ratelimit, asas-jobs, asas-access, asas-workflow, asas-notifications, asas-search, asas-mcp, asas-tenancy, asas-audit, asas-oracle]
         engine: [sqlite, postgres]
-        # asas-oracle-hcm touches no database (same rule as asas-cli): one leg,
+        # asas-oracle touches no database (same rule as asas-cli): one leg,
         # not an identical suite twice plus an unused postgres service.
         exclude:
-          - package: asas-oracle-hcm
+          - package: asas-oracle
             engine: postgres
 
     services:

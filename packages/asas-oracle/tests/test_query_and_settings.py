@@ -2,7 +2,7 @@
 
 import pytest
 
-from asas_oracle_hcm import (
+from asas_oracle import (
     OracleConfigError,
     OracleQueryError,
     OracleSettings,
@@ -52,7 +52,7 @@ def test_a_field_name_must_be_an_attribute_name(field):
 
 
 def test_query_errors_are_value_errors_and_oracle_errors():
-    from asas_oracle_hcm import OracleError
+    from asas_oracle import OracleError
 
     with pytest.raises(ValueError):
         literal("a;b")

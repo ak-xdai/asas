@@ -34,7 +34,7 @@ four host-contract slots. Everything is an object the host constructs:
   :func:`count_calls` for the Oracle requests one host request made.
 - ``client.request(...)``: the one public building block every verb uses, for
   what the verbs do not cover.
-- :mod:`asas_oracle_hcm.check` (``asas-oracle-check``): each read a deployment
+- :mod:`asas_oracle.check` (``asas-oracle-check``): each read a deployment
   depends on called once, from a manifest of :class:`Probe` s, for verifying a
   gateway registration (the HCM reference reads by default).
 - ``query``: the ``q`` grammar (:func:`eq`, :func:`like`, :func:`and_`,

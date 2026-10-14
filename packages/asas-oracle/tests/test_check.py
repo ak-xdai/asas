@@ -7,8 +7,8 @@ import json
 import httpx
 import pytest
 
-from asas_oracle_hcm import REFERENCE_PROBES, OracleSettings, Probe, check, load_manifest
-from asas_oracle_hcm.check import main, render
+from asas_oracle import REFERENCE_PROBES, OracleSettings, Probe, check, load_manifest
+from asas_oracle.check import main, render
 
 from conftest import BASE, collection
 

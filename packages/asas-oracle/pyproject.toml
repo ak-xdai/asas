@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "asas-oracle-hcm"
+name = "asas-oracle"
 version = "0.1.0"
 description = "Asas Oracle Fusion HCM module: an async REST client for Oracle Fusion with typed errors, the query grammar's traps written down, a pluggable read cache, and id-to-name lookups (grades, departments, business units, jobs, positions, people) that respect what the instance will actually answer."
 readme = "README.md"
@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
-asas-oracle-check = "asas_oracle_hcm.check:main"
+asas-oracle-check = "asas_oracle.check:main"
 
 [project.optional-dependencies]
 dev = [
@@ -29,7 +29,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/asas_oracle_hcm"]
+packages = ["src/asas_oracle"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

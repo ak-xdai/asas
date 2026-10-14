@@ -17,7 +17,7 @@ Both now import from ``seeding``, so the exported name is unambiguous.
 
 import types
 
-import asas_oracle_hcm
+import asas_oracle
 
 # Names the host contract documents as callable. A package exposes some subset;
 # whichever it exposes must actually be callable, never a shadowing submodule.
@@ -40,15 +40,15 @@ def test_declares_all():
     """``__all__`` is the package's statement of its own public surface. Without
     one, ``import *`` leaks every transitively-imported name and a reader cannot
     tell the contract from an implementation detail."""
-    assert hasattr(asas_oracle_hcm, "__all__"), "asas_oracle_hcm must declare __all__"
-    assert asas_oracle_hcm.__all__, "asas_oracle_hcm.__all__ must not be empty"
+    assert hasattr(asas_oracle, "__all__"), "asas_oracle must declare __all__"
+    assert asas_oracle.__all__, "asas_oracle.__all__ must not be empty"
 
 
 def test_every_exported_name_resolves():
     """A name in ``__all__`` that does not exist is a typo that surfaces only on
     ``import *`` — or never."""
-    missing = [n for n in asas_oracle_hcm.__all__ if not hasattr(asas_oracle_hcm, n)]
-    assert not missing, f"asas_oracle_hcm.__all__ names that do not resolve: {missing}"
+    missing = [n for n in asas_oracle.__all__ if not hasattr(asas_oracle, n)]
+    assert not missing, f"asas_oracle.__all__ names that do not resolve: {missing}"
 
 
 def test_contract_names_are_callable():
@@ -56,10 +56,10 @@ def test_contract_names_are_callable():
     be callable — a submodule shadowing one is invisible until someone calls it."""
     broken = [
         n for n in CONTRACT_CALLABLES
-        if hasattr(asas_oracle_hcm, n) and not callable(getattr(asas_oracle_hcm, n))
+        if hasattr(asas_oracle, n) and not callable(getattr(asas_oracle, n))
     ]
     assert not broken, (
-        f"asas_oracle_hcm exposes contract names that are not callable: {broken}. "
+        f"asas_oracle exposes contract names that are not callable: {broken}. "
         f"A submodule is probably shadowing the function — rename the submodule."
     )
 
@@ -68,12 +68,12 @@ def test_module_exports_are_intentional():
     """Modules may be exported (``asas_search.fts`` is part of its API), but only
     deliberately. An unlisted one usually means a submodule leaked into __all__."""
     exported = {
-        n for n in asas_oracle_hcm.__all__
-        if isinstance(getattr(asas_oracle_hcm, n), types.ModuleType)
+        n for n in asas_oracle.__all__
+        if isinstance(getattr(asas_oracle, n), types.ModuleType)
     }
     unexpected = exported - INTENTIONAL_MODULE_EXPORTS
     assert not unexpected, (
-        f"asas_oracle_hcm exports undeclared modules: {sorted(unexpected)}. If that is "
+        f"asas_oracle exports undeclared modules: {sorted(unexpected)}. If that is "
         f"deliberate, add them to INTENTIONAL_MODULE_EXPORTS; if not, the name is "
         f"shadowing something."
     )
@@ -81,5 +81,5 @@ def test_module_exports_are_intentional():
 
 def test_version_is_exported():
     """Hosts pin by version; the running code must be able to say what it is."""
-    assert isinstance(asas_oracle_hcm.__version__, str)
-    assert asas_oracle_hcm.__version__
+    assert isinstance(asas_oracle.__version__, str)
+    assert asas_oracle.__version__

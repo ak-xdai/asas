@@ -124,10 +124,10 @@ _SPECS = [
         "table-owning + router",
     ),
     PackageSpec(
-        "oracle-hcm",
-        "asas-oracle-hcm",
-        "asas_oracle_hcm",
-        "packages/asas-oracle-hcm",
+        "oracle",
+        "asas-oracle",
+        "asas_oracle",
+        "packages/asas-oracle",
         "Async Oracle Fusion HCM REST client: typed errors, q-grammar "
         "helpers, cached id-to-name and people lookups.",
         "table-less, router-less",

@@ -1,6 +1,6 @@
-# Changelog: `asas-oracle-hcm`
+# Changelog: `asas-oracle`
 
-Versions follow semver, and the git tag matches this file: `asas-oracle-hcm/v0.1.0`.
+Versions follow semver, and the git tag matches this file: `asas-oracle/v0.1.0`.
 Pre-1.0, a breaking change bumps the **minor**.
 
 Release procedure and the historical tag mapping: [`RELEASING.md`](../../RELEASING.md).

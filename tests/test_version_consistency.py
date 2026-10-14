@@ -43,7 +43,7 @@ def _changelog_version(pkg: pathlib.Path) -> str:
 
 def test_every_package_is_checked():
     """Fourteen packages: the original ten, plus asas-cli, asas-tenancy,
-    asas-audit and asas-oracle-hcm. The count is asserted deliberately so a
+    asas-audit and asas-oracle. The count is asserted deliberately so a
     fifteenth cannot slip past this file unnoticed."""
     assert len(PACKAGES) == 14, [p.name for p in PACKAGES]
 

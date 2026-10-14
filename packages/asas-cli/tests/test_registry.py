@@ -15,7 +15,7 @@ EXPECTED_KEYS = {
     "mcp",
     "tenancy",
     "audit",
-    "oracle-hcm",
+    "oracle",
 }
 
 

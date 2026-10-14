@@ -1,4 +1,4 @@
-# asas-oracle-hcm
+# asas-oracle
 
 Oracle Fusion HCM over REST, async: a client with typed errors, the query
 language's traps written down once, a read cache behind a seam, and id-to-name
@@ -29,7 +29,7 @@ constructs and owns, so a process that talks to two instances makes two
 clients, and a test passes a fake transport instead of patching a module.
 
 ```python
-import asas_oracle_hcm as oracle
+import asas_oracle as oracle
 
 # boot (host wiring): build settings from *your* configuration; the library reads none
 client = oracle.OracleFusionClient(oracle.OracleSettings(

@@ -154,7 +154,7 @@ class OracleLookups:
     ids straight off their rows.
 
     Pass a :class:`LookupStore` to keep answers across processes and restarts
-    (see :mod:`asas_oracle_hcm.store` for the rules it gets: stale answers
+    (see :mod:`asas_oracle.store` for the rules it gets: stale answers
     served and refreshed in the background, negative answers kept, refreshes
     that skip the client's read cache). The freshness windows are the same two
     TTLs. Background refreshes are tasks this object holds; ``await

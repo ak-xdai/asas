@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from asas_oracle_hcm import (
+from asas_oracle import (
     DIRECTORY_KIND,
     POSITION_BUDGET_KIND,
     MemoryLookupStore,

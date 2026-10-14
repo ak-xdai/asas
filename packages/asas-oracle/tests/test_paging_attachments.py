@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import pytest
 
-from asas_oracle_hcm import (
+from asas_oracle import (
     DEFAULT_OFFSET_CEILING,
     attachments,
     capped_page,
@@ -107,7 +107,7 @@ def _attachment(key: str, **over):
 
 
 def test_a_verified_download_answers_the_bytes_the_type_and_the_NAME(client, oracle):
-    from asas_oracle_hcm import download_attachment
+    from asas_oracle import download_attachment
 
     oracle.route("/workers/7/child/attachments", collection(_attachment("abc123")))
     oracle.route(
@@ -126,7 +126,7 @@ def test_A_KEY_FROM_ANOTHER_RECORD_IS_A_404_AND_NEVER_A_DOWNLOAD(client, oracle)
     """The whole reason this exists beside `download_enclosure`: an enclosure
     key is a bare string in a URL, so without the check a key lifted from one
     record downloads against any other."""
-    from asas_oracle_hcm import OracleNotFoundError, download_attachment
+    from asas_oracle import OracleNotFoundError, download_attachment
 
     oracle.route("/workers/7/child/attachments", collection(_attachment("mine")))
     with pytest.raises(OracleNotFoundError):

@@ -10,7 +10,7 @@ The traps, verified against a live Fusion HCM pod:
 - **There is no working OR.** ``OR``, ``IN (...)`` and a comma-separated value
   list all silently match NOTHING: no error, just an empty collection. So a
   clause list is AND-only, a facet carries at most one value, and "several ids"
-  means several requests (see :class:`~asas_oracle_hcm.OracleLookups`).
+  means several requests (see :class:`~asas_oracle.OracleLookups`).
 - **LIKE takes ``%`` wildcards** and is case-insensitive on ``Title``.
 - **A value is single-quoted, and there is no escape form**, so an embedded
   quote ends the literal and an embedded ``;`` starts another clause: either
