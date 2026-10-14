@@ -125,3 +125,16 @@ class OracleUnavailableError(OracleUpstreamError):
         super().__init__(
             message, status=None, method=method, path=path, retry_after_seconds=retry_after_seconds
         )
+
+
+def transport_detail(exc: BaseException) -> str:
+    """What a transport failure WAS, in one line: the error's type and its own
+    words, or its cause's.
+
+    httpx's connect and timeout errors often carry no message at all, which
+    leaves a log reading "transport failure on GET /x:" with nothing after it
+    and no way to tell a refused connection from a DNS failure, a TLS fault or
+    a timeout. The TYPE is the part that always says something.
+    """
+    words = str(exc).strip() or str(exc.__cause__ or "").strip() or "no message"
+    return f"{type(exc).__name__}: {words}"

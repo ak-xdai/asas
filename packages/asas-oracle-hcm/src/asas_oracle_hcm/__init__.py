@@ -86,6 +86,7 @@ from .errors import (
     OracleQueryError,
     OracleUnavailableError,
     OracleUpstreamError,
+    transport_detail,
 )
 from .lookups import (
     DEFAULT_CONCURRENCY,
@@ -111,6 +112,13 @@ from .query import (
     text,
 )
 from .paging import DEFAULT_OFFSET_CEILING, CappedPage, capped_page
+from .accounts import (
+    SCRUBBED_EMAIL,
+    USER_ACCOUNTS,
+    find_account,
+    holds_any_role,
+    usernames_for,
+)
 from .routing import GATEWAY_MARKER, Route, is_gateway, misroute
 from .settings import OracleSettings
 from .store import LookupStore, MemoryLookupStore, StoredAnswer
@@ -192,6 +200,12 @@ __all__ = [
     "Route",
     "is_gateway",
     "misroute",
+    "SCRUBBED_EMAIL",
+    "USER_ACCOUNTS",
+    "find_account",
+    "holds_any_role",
+    "usernames_for",
+    "transport_detail",
     "and_",
     "and_words",
     "REST_FRAMEWORK_V2",
