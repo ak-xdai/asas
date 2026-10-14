@@ -54,6 +54,7 @@ from .errors import (
     OracleNotFoundError,
     OracleUnavailableError,
     OracleUpstreamError,
+    transport_detail,
 )
 from .settings import OracleSettings
 from .upstream import BreakerPolicy, RequestEvent, UpstreamHealth
@@ -326,7 +327,19 @@ class OracleFusionClient:
                 elapsed = _ms(started)
                 fault = health.record(method, resource, elapsed, status=None)
                 self._emit(RequestEvent(method, resource, path, None, elapsed, fault))
-                logger.warning("oracle %s %s: transport failure: %s", method, path, exc)
+                # THE TYPE AND THE HOST, not `str(exc)`: httpx's connect and
+                # timeout errors often carry NO message, which left this line
+                # reading "transport failure: " with nothing after it and no
+                # way to tell a refused connection from DNS, TLS or a
+                # timeout. The host matters because a gateway in front of
+                # Fusion is a different thing to go and check.
+                logger.warning(
+                    "oracle %s %s: transport failure (host %s): %s",
+                    method,
+                    path,
+                    httpx.URL(self._settings.base_url).host or "?",
+                    transport_detail(exc),
+                )
                 raise OracleUpstreamError(
                     "Oracle is unreachable.", method=method, path=path
                 ) from exc
@@ -367,6 +380,8 @@ class OracleFusionClient:
                 method=method,
                 path=path,
                 retry_after_seconds=_retry_after(response) if code in (429, 503) else None,
+                body=text,
+                content_type=response.headers.get("content-type", ""),
             )
         return response
 

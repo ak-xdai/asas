@@ -49,6 +49,8 @@ class OracleUpstreamError(OracleError):
         method: str = "",
         path: str = "",
         retry_after_seconds: int | None = None,
+        body: str = "",
+        content_type: str = "",
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -57,6 +59,23 @@ class OracleUpstreamError(OracleError):
         #: What the upstream asked a caller to wait (``Retry-After`` on a 429 or
         #: a 503), or ``None`` when it said nothing.
         self.retry_after_seconds = retry_after_seconds
+        #: The refusal's first characters and its media type, FOR
+        #: CLASSIFICATION ONLY.
+        #:
+        #: A host often has to tell refusals apart more finely than this
+        #: package can: which of its own error codes a 404 becomes, whether a
+        #: 405 through a gateway means an unregistered operation, whether an
+        #: HTML error page means the base URL is wrong rather than the record
+        #: missing. All of that is read off the body, and without it here a
+        #: host has to drop below the client and lose the cache and the
+        #: breaker with it.
+        #:
+        #: NEVER SHOW IT. Oracle's bodies carry tenant detail, and its
+        #: attachment documents carry signed download URLs, so this is for
+        #: branching in code and never for a message, a log line or an API
+        #: response. Truncated for that reason as much as for size.
+        self.body = body
+        self.content_type = content_type
 
     @property
     def is_transient(self) -> bool:
