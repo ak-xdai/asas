@@ -58,6 +58,15 @@ class OracleSettings:
     oauth_client_secret: str = ""
     oauth_scope: str = ""
     extra_headers: Mapping[str, str] = field(default_factory=dict)
+    #: Which way this deployment reaches Fusion (see :mod:`asas_oracle_hcm.routing`).
+    #: It is CONFIGURATION and never inferred from the address, so an address
+    #: that contradicts it is a fault to report rather than a shape to follow.
+    route: str = "direct"
+    #: This instance's segment in every cache key. Two deployments sharing one
+    #: Redis must never share an answer: the pods are different instances with
+    #: the same resource paths, so without a scope a read of `/grades` on one
+    #: is served from the other's cache.
+    cache_scope: str = ""
     max_connections: int = 20
     connect_retries: int = 2
 

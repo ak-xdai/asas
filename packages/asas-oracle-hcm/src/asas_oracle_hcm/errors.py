@@ -91,6 +91,27 @@ class OracleAlreadyExistsError(OracleUpstreamError):
     by that key. On a first attempt it means a genuine collision."""
 
 
+class OracleLockedError(OracleUpstreamError):
+    """Another user holds the record's lock in Fusion.
+
+    A 400 with prose, not a 409 and not a 423, so it is told apart by its
+    words like the duplicate refusal is. TRANSIENT and therefore its own
+    class: somebody has the record open in the Fusion UI and the same write
+    lands once they let go, so a caller with an outbox should BACK OFF and
+    retry rather than park the row as failed.
+    """
+
+
+class OracleGatewayError(OracleUpstreamError):
+    """The API gateway refused before Oracle was reached at all.
+
+    An operation it does not carry, a transport it was not registered for, a
+    path parameter it cannot map. Worth its own class because the fix is in a
+    different place and belongs to different people: a gateway registration,
+    not an Oracle record, a credential or this code.
+    """
+
+
 class OracleUnavailableError(OracleUpstreamError):
     """The client's circuit breaker is open: this process saw Oracle fail
     several times in a row and is not asking again until the cooldown ends.

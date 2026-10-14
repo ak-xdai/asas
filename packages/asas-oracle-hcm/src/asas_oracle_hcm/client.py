@@ -47,6 +47,8 @@ from .auth import Auth
 from .cache import Cache, CachePolicy, MemoryCache
 from .errors import (
     OracleAlreadyExistsError,
+    OracleGatewayError,
+    OracleLockedError,
     OracleAuthError,
     OracleNotConfiguredError,
     OracleNotFoundError,
@@ -70,9 +72,32 @@ _ADF_ITEM = "application/vnd.oracle.adf.resourceitem+json"
 _DUPLICATE_MARKERS = ("already exists", "duplicate", "unique")
 
 
-def _reads_as_duplicate(text: str) -> bool:
+#: Fusion's row-lock refusal: "Failed to lock the record in table ... another
+#: user holds the lock." A 400, and TRANSIENT, so it gets its own class and a
+#: caller with an outbox can back off instead of parking the row.
+_LOCK_MARKERS = ("another user holds the lock", "failed to lock the record")
+
+#: What an API GATEWAY says when it refuses before Oracle is reached at all:
+#: an operation it does not carry, a transport it was not registered for, a
+#: path parameter it cannot map. Measured on a webMethods/CentraSite gateway.
+_GATEWAY_MARKERS = (
+    "transport protocol not supported",
+    "casdk-",
+    "api gateway",
+    "not registered",
+    "centrasite",
+    "no matching resource",
+    "resource not found",
+)
+
+
+def _matches(text: str, markers: tuple[str, ...]) -> bool:
     lowered = (text or "").lower()
-    return any(marker in lowered for marker in _DUPLICATE_MARKERS)
+    return any(marker in lowered for marker in markers)
+
+
+def _reads_as_duplicate(text: str) -> bool:
+    return _matches(text, _DUPLICATE_MARKERS)
 
 
 def _ms(started: float) -> float:
@@ -93,6 +118,30 @@ def _retry_after(response: httpx.Response) -> int | None:
     from datetime import datetime, timezone
 
     return max(0, int((when - datetime.now(timezone.utc)).total_seconds()))
+
+
+def _route_headers(route: str, method: str, body: object) -> dict[str, str]:
+    """The headers the ROUTE itself needs, before auth and before the
+    caller's own.
+
+    AN EMPTY ``Content-Type`` ON EVERY GATEWAY READ. Measured on a
+    webMethods gateway in front of Oracle Integration Cloud: a GET with no
+    Content-Type at all, and a GET with ``application/json``, are both
+    answered **415**; an EMPTY one is answered 200. httpx sends no
+    Content-Type on a bodyless request, so the header has to be set
+    explicitly to the empty string, which httpx then sends as present and
+    blank.
+
+    A WRITE STATES ITS OWN MEDIA TYPE and must never inherit the empty one:
+    a body sent with a blank Content-Type is refused. The caller's own
+    headers are merged after these, so a write that names its type wins; this
+    is the belt for one that forgets. The direct route gets neither.
+    """
+    if route != "gateway":
+        return {}
+    if method.upper() in ("GET", "HEAD", "DELETE") and body is None:
+        return {"Content-Type": ""}
+    return {"Content-Type": "application/json"}
 
 
 def _resource(path: str) -> str:
@@ -145,9 +194,14 @@ class OracleFusionClient:
         self._cache: Cache = cache if cache is not None else MemoryCache()
         self._policy = cache_policy or CachePolicy()
         # Keys are scoped to the instance, so a test pod and production can
-        # share one store without sharing answers.
-        scope = hashlib.sha1(settings.base_url.encode()).hexdigest()[:10]
-        self._ns = f"{cache_namespace}:{scope}"
+        # share one store without sharing answers. The host may NAME the scope
+        # (`settings.cache_scope`) instead of taking the address's digest,
+        # which is what a host wants when it keeps keys of its own beside
+        # these and needs them in the same segment.
+        self._scope = settings.cache_scope or hashlib.sha1(
+            settings.base_url.encode()
+        ).hexdigest()[:10]
+        self._ns = f"{cache_namespace}:{self._scope}"
         self._health = UpstreamHealth(breaker)
 
     # -- lifecycle -------------------------------------------------------------
@@ -160,6 +214,16 @@ class OracleFusionClient:
     def health(self) -> UpstreamHealth:
         """The breaker and the call statistics (``health.snapshot()``)."""
         return self._health
+
+    @property
+    def cache_scope(self) -> str:
+        """This instance's segment in every cache key.
+
+        Exposed because a host usually keeps keys of its own next to these (a
+        permission answer, a cursor) and they have to be scoped the same way,
+        or two deployments sharing one Redis share those too.
+        """
+        return self._scope
 
     @property
     def base_url(self) -> str:
@@ -242,6 +306,7 @@ class OracleFusionClient:
             try:
                 sent_headers = {
                     "Accept": "application/json",
+                    **_route_headers(s.route, method, json_body),
                     **s.extra_headers,
                     **await self._auth.headers(http),
                     **(headers or {}),
@@ -288,6 +353,14 @@ class OracleFusionClient:
                 kind = OracleAuthError
             elif method == "POST" and code in (400, 409) and _reads_as_duplicate(text):
                 kind = OracleAlreadyExistsError
+            elif code == 400 and _matches(text, _LOCK_MARKERS):
+                kind = OracleLockedError
+            # LAST of the prose tests, so a refusal Oracle itself made is
+            # never relabelled as the gateway's: the markers are loose, and
+            # "resource not found" could be either on a 404 the branch above
+            # has already claimed.
+            elif _matches(text, _GATEWAY_MARKERS):
+                kind = OracleGatewayError
             raise kind(
                 f"Oracle answered {code}.",
                 status=code,

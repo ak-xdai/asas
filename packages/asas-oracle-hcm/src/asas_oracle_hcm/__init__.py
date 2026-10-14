@@ -79,6 +79,8 @@ from .errors import (
     OracleAuthError,
     OracleConfigError,
     OracleError,
+    OracleGatewayError,
+    OracleLockedError,
     OracleNotConfiguredError,
     OracleNotFoundError,
     OracleQueryError,
@@ -109,6 +111,7 @@ from .query import (
     text,
 )
 from .paging import DEFAULT_OFFSET_CEILING, CappedPage, capped_page
+from .routing import GATEWAY_MARKER, Route, is_gateway, misroute
 from .settings import OracleSettings
 from .store import LookupStore, MemoryLookupStore, StoredAnswer
 from .upstream import (
@@ -167,6 +170,8 @@ __all__ = [
     "OracleFusionClient",
     "OracleLookups",
     "OracleNotConfiguredError",
+    "OracleGatewayError",
+    "OracleLockedError",
     "OracleNotFoundError",
     "OracleQueryError",
     "OracleSettings",
@@ -183,6 +188,10 @@ __all__ = [
     "StoredAnswer",
     "UpstreamHealth",
     "WorkerDepartment",
+    "GATEWAY_MARKER",
+    "Route",
+    "is_gateway",
+    "misroute",
     "and_",
     "and_words",
     "REST_FRAMEWORK_V2",
